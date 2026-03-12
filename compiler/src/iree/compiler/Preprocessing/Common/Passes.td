@@ -53,9 +53,9 @@ def ConvertConv2DToImg2ColPass :
   let summary = "Convert linalg convolution ops to matmul img2col based implementation";
   let dependentDialects = [
     "mlir::linalg::LinalgDialect",
-    "mlir::tensor::TensorDialect",
   ];
 }
+
 
 def ConvertConvFilterToChannelsLastPass:
     Pass<"iree-preprocessing-convert-conv-filter-to-channels-last", ""> {
@@ -177,6 +177,56 @@ def GeneralizeLinalgMatMulPass :
   let summary = "Convert linalg matmul ops to linalg.generics.";
   let dependentDialects = [
     "mlir::linalg::LinalgDialect",
+  ];
+}
+
+def LoopifyInsertSliceChainPass :
+    InterfacePass<"iree-preprocessing-loopify-insert-slice-chain", "mlir::FunctionOpInterface"> {
+  let summary = "Convert unrolled tensor.insert_slice chains to scf.for or scf.forall loops";
+  let description = [{
+    Detects chains of tensor.insert_slice ops with consecutive constant offsets
+    (produced when IREE lowers stablehlo.concatenate of N operands), and
+    converts them to loops.
+
+    Default mode (use-forall=false): creates scf.for over the slice dimension
+    (levels), keeping tensor<1xN> slice computations per iteration.
+
+    Forall mode (use-forall=true): creates scf.forall over the cell dimension
+    (N cells in parallel) with scf.for over levels inside. Each cell-thread
+    carries scalar values in registers and writes a column (numLevels x 1) into
+    the shared output via tensor.parallel_insert_slice. This matches the
+    GPU-optimal dispatch(N_cells){ for(level) { scalar_compute } } structure.
+
+    Example (forall mode):
+      %result = scf.forall (%c = 0 to N) shared_outs(%acc = %empty) {
+        %col = scf.for %k = 0 to 90 iter_args(%col_acc=%empty_col, %carry=%init) {
+          %val = tensor.extract %src[%k, %c]
+          %out = <scalar body using %val and %carry>
+          %new_col = tensor.insert %out into %col_acc[%k, 0]
+          scf.yield %new_col, %out
+        }
+        scf.forall.in_parallel {
+          tensor.parallel_insert_slice %col into %acc[0, %c][90, 1][1, 1]
+        }
+      }
+  }];
+  let options = [
+    Option<"minChainLength", "min-chain-length", "int64_t",
+           /*default=*/"8",
+           "Minimum chain length to trigger loopification">,
+    Option<"useForall", "use-forall", "bool",
+           /*default=*/"false",
+           "If true, generate scf.forall over cells with scf.for over levels "
+           "(GPU-optimal structure) instead of scf.for over levels">,
+  ];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::tensor::TensorDialect",
+    "mlir::iree_compiler::IREE::Flow::FlowDialect",
+    "mlir::iree_compiler::IREE::Codegen::IREECodegenDialect",
+    "IREE::TensorExt::IREETensorExtDialect",
   ];
 }
 

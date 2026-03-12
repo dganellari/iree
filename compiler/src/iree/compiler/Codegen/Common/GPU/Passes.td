@@ -33,11 +33,11 @@ def GPUCheckResourceUsagePass :
 def GPUCombineLayoutTransformationPass :
     InterfacePass<"iree-codegen-gpu-combine-layout-transformation", "mlir::FunctionOpInterface"> {
   let summary =
-    "Combines layout transformation operations into a single map_scatter operation.";
+    "Combines layout transformation operations into a single map_store operation.";
   let description = [{
     Starting from iree_codegen.store_to_buffer ops, iteratively combine producer
     layout/indexing transformation ops (linalg.transpose, tensor.collapse_shape,
-    etc.) into a single iree_linalg_ext.map_scatter operation. For tensor.pad
+    etc.) into a single iree_linalg_ext.map_store operation. For tensor.pad
     ops, the writing of pad values is distributed to workgroups and threads, and
     then the padding values are written directly to the output buffer of the
     store_to_buffer op.
@@ -83,12 +83,13 @@ def GPUConvertToCoalescedDMAPass :
 
 def AMDGPULowerCoalescedDMAToGatherLDSPass :
     InterfacePass<"iree-codegen-amdgpu-lower-coalesced-dma-to-gather-lds", "mlir::FunctionOpInterface"> {
-  let summary = "Lower coalesced DMA operations to amdgpu.gather_to_lds.";
+  let summary = "Lower coalesced DMA operations to amdgpu.gather_to_lds with vector fallback.";
   let dependentDialects = [
     "::mlir::affine::AffineDialect",
     "::mlir::gpu::GPUDialect",
     "::mlir::scf::SCFDialect",
     "::mlir::amdgpu::AMDGPUDialect",
+    "::mlir::vector::VectorDialect",
     "::mlir::iree_compiler::IREE::GPU::IREEGPUDialect"
   ];
 }
@@ -244,7 +245,7 @@ def GPUPipeliningPass :
   let options = [
     Option<"epiloguePeeling", "epilogue-peeling", "bool",
             /*default=*/"true",
-           "Try to use un-peeling epilogue when false, peeled epilouge o.w.">,
+           "Try to use un-peeling epilogue when false, peeled epilogue o.w.">,
     Option<"depth", "pipeline-depth", "int64_t",
             /*default=*/"2",
            "Number of stages ">,
@@ -476,6 +477,41 @@ def ExpandGPUOpsPass :
   let summary = "Expands high-level GPU ops, such as clustered gpu.subgroup_reduce.";
   let dependentDialects = [
     "::mlir::gpu::GPUDialect"
+  ];
+}
+
+def GPULoopifyUnrolledSliceChainPass :
+    InterfacePass<"iree-codegen-gpu-loopify-unrolled-slice-chain",
+                  "mlir::FunctionOpInterface"> {
+  let summary = "Convert unrolled insert_slice chains to scf.forall + scf.for loops";
+  let description = [{
+    Detects chains of tensor.insert_slice ops with consecutive constant offsets
+    (produced by JAX-traced Python loops lowered through StableHLO) and converts
+    them to GPU-friendly loop structures.
+
+    When `use-forall` is true (default), generates:
+      scf.forall (%cell in [0, numCells))
+        scf.for %k = 0 to numLevels
+          <scalarized body>
+
+    When false, generates a plain scf.for with tensor-level operations.
+
+    This pass runs at the codegen level (inside dispatch functions) to avoid
+    interfering with dispatch creation and upstream tiling passes.
+  }];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::linalg::LinalgDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::tensor::TensorDialect",
+  ];
+  let options = [
+    Option<"minChainLength", "min-chain-length", "int64_t",
+           /*default=*/"8",
+           "Minimum number of consecutive insert_slice ops to trigger loopification.">,
+    Option<"useForall", "use-forall", "bool",
+           /*default=*/"true",
+           "If true, generate scf.forall over cells with scf.for over levels.">,
   ];
 }
 
