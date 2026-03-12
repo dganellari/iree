@@ -599,8 +599,8 @@ hal.executable public @main {
 
 // CHECK-LABEL: func @skinny_matmul_config
 
-//   CHECK-DAG:   %[[IDX:.+]] = gpu.thread_id  x
-//   CHECK-DAG:   %[[IDY:.+]] = gpu.thread_id  y
+//   CHECK-DAG:   %[[IDX:.+]] = gpu.thread_id x
+//   CHECK-DAG:   %[[IDY:.+]] = gpu.thread_id y
 //       CHECK:   %[[LINID1:.+]] = affine.apply #[[$MAP0]]()[%[[IDY]], %[[IDX]]]
 //       CHECK:   scf.forall ({{.*}}) in (32, 98) {
 //       CHECK:     scf.for %{{.*}} = %c0 to %c256 step %c4 {{.*}} -> (vector<1x4xf32>)
@@ -1066,16 +1066,20 @@ hal.executable public @main {
 }
 
 // CHECK-LABEL: func @elemwise_reduction_elemwise
-//       CHECK:   scf.for %{{.*}} = %{{.*}} to %c16 step %c1 {{.*}} -> (vector<1xf32>)
-//       CHECK:     scf.for
-//       CHECK:       scf.for
-//       CHECK:         %[[REDUCE:.+]] = vector.multi_reduction
-//       CHECK:         scf.yield %[[REDUCE]]
+//   CHECK-DAG:   %[[C144:.+]] = arith.constant 144 : index
+//   CHECK-DAG:   %[[C16:.+]] = arith.constant 16 : index
+//   CHECK-DAG:   %[[C9:.+]] = arith.constant 9 : index
+//   CHECK-DAG:   %[[C1:.+]] = arith.constant 1 : index
+//   CHECK-DAG:   %[[C0:.+]] = arith.constant 0 : index
+//       CHECK:   scf.for %{{.*}} = %[[C0]] to %[[C144]] step %[[C1]] {{.*}} -> (vector<1xf32>)
+//   CHECK-NOT:     scf.for
+//       CHECK:     %[[REDUCE:.+]] = vector.multi_reduction
+//       CHECK:     scf.yield %[[REDUCE]]
 
-//       CHECK:   scf.for %{{.*}} = %{{.*}} to %c16 step %c1
-//       CHECK:     scf.for
-// CHECK-COUNT-4:     arith.addf {{.*}} : vector<9xf32>
-//       CHECK:       vector.transfer_write {{.*}} vector<9xi8>, memref<32x16x9x9xi8, #amdgpu.address_space<fat_raw_buffer>>
+//       CHECK:   scf.for %{{.*}} = %[[C0]] to %[[C16]] step %[[C1]]
+//       CHECK:     scf.for %{{.*}} = %[[C0]] to %[[C9]] step %[[C1]]
+// CHECK-COUNT-4:       arith.addf {{.*}} : vector<9xf32>
+//       CHECK:         vector.transfer_write {{.*}} vector<9xi8>, memref<32x16x9x9xi8, #amdgpu.address_space<fat_raw_buffer>>
 
 // -----
 
@@ -1363,7 +1367,7 @@ hal.executable public @main {
       hal.return %x, %y, %z : index, index, index
     }
     builtin.module {
-      func.func @map_scatter() attributes {translation_info = #translation_info} {
+      func.func @map_store() attributes {translation_info = #translation_info} {
         %c0 = arith.constant 0 : index
         %true = arith.constant true
         %3 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : memref<2048x2048xf32, #hal.descriptor_type<storage_buffer>>
@@ -1372,7 +1376,7 @@ hal.executable public @main {
         %6 = amdgpu.fat_raw_buffer_cast %5 resetOffset : memref<16x16x128x128xf32, #hal.descriptor_type<storage_buffer>> to memref<16x16x128x128xf32, #amdgpu.address_space<fat_raw_buffer>>
         %7 = iree_codegen.load_from_buffer %4 : memref<2048x2048xf32, #amdgpu.address_space<fat_raw_buffer>> -> tensor<2048x2048xf32>
         %8 = tensor.empty() : tensor<16x16x128x128xf32>
-        %9 = iree_linalg_ext.map_scatter {lowering_config = #lowering_config} %7 into %8 {
+        %9 = iree_linalg_ext.map_store {lowering_config = #lowering_config} %7 into %8 {
         ^bb0(%arg0: index, %arg1: index):
           %10:2 = affine.delinearize_index %arg0 into (16, 128) : index, index
           %11:2 = affine.delinearize_index %arg1 into (16, 128) : index, index
@@ -1385,7 +1389,7 @@ hal.executable public @main {
   }
 }
 
-// CHECK-LABEL: func @map_scatter
+// CHECK-LABEL: func @map_store
 // CHECK-NOT:     memref.alloca
 // CHECK:         scf.forall {{.*}} in (2048, 8) {
 // CHECK:           %[[READ:.+]] = vector.transfer_read{{.*}}: memref<2048x2048xf32, #amdgpu.address_space<fat_raw_buffer>>, vector<4xf32>

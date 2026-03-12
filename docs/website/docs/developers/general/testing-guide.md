@@ -12,7 +12,7 @@ components and use different tooling depending on the needs of that component.
 | Compiler tests  | iree_lit_test                                   | Bazel/CMake  | Host                |
 | Runtime tests   | iree_cc_test                                    | Bazel/CMake  | Host/Device         |
 |                 | iree_native_test                                | Bazel/CMake  | Host/Device         |
-|                 | iree_hal_cts_test_suite                         | CMake        | Host/Device         |
+|                 | iree_hal_cts_test_suite                         | Bazel/CMake  | Host/Device         |
 | Core E2E tests  | iree_check_test                                 | Bazel/CMake  | Host/Device         |
 |                 | iree_static_linker_test                         | CMake        | Host/Device         |
 
@@ -193,12 +193,12 @@ iree_cc_test(
 ```
 
 There are other more specific test targets, such as `iree_hal_cts_test_suite`,
-which are designed to test specific runtime support with template configuration
-and is not supported by Bazel rules.
+which are designed to test HAL driver conformance across all supported
+backends. Supported in both Bazel and CMake.
 
 ### Code Coverage
 
-Use the [IREE_ENABLE_RUNTIME_COVERAGE](../../building/cmake-options/#iree_enable_runtime_coverage)
+Use the [IREE_ENABLE_RUNTIME_COVERAGE](../building/cmake-options.md#iree_enable_runtime_coverage)
 CMake option to enable code coverage instrumentation and add synthetic targets
 for managing profiling state. Tests run with coverage enabled with automatically
 write profiles to the build directory and then the
@@ -399,7 +399,7 @@ The CMake functions follow a similar pattern. The calls to them are generated in
 our `CMakeLists.txt` file by
 [bazel_to_cmake](https://github.com/iree-org/iree/tree/main/build_tools/bazel_to_cmake/bazel_to_cmake.py).
 
-There are other test targets that generate tests based on template configuraton
+There are other test targets that generate tests based on template configuration
 and platform detection, such as `iree_static_linker_test`. Those targets are
 not supported by Bazel rules at this point.
 

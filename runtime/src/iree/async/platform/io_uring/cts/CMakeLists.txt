@@ -113,12 +113,68 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 iree_cc_test(
   NAME
-    sync_tests
+    sync_notification_tests
   SRCS
     "${PROJECT_SOURCE_DIR}/runtime/src/iree/async/cts/util/test_main.cc"
   DEPS
     ::backends
-    iree::async::cts::sync::all_tests
+    iree::async::cts::sync::notification_tests
+    iree::async::cts::util::registry
+    iree::testing::gtest
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+iree_cc_test(
+  NAME
+    sync_shared_notification_tests
+  SRCS
+    "${PROJECT_SOURCE_DIR}/runtime/src/iree/async/cts/util/test_main.cc"
+  DEPS
+    ::backends
+    iree::async::cts::sync::shared_notification_tests
+    iree::async::cts::util::registry
+    iree::testing::gtest
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+iree_cc_test(
+  NAME
+    sync_platform_tests
+  SRCS
+    "${PROJECT_SOURCE_DIR}/runtime/src/iree/async/cts/util/test_main.cc"
+  DEPS
+    ::backends
+    iree::async::cts::sync::platform_tests
+    iree::async::cts::util::registry
+    iree::testing::gtest
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+iree_cc_test(
+  NAME
+    sync_relay_tests
+  SRCS
+    "${PROJECT_SOURCE_DIR}/runtime/src/iree/async/cts/util/test_main.cc"
+  DEPS
+    ::backends
+    iree::async::cts::sync::relay_tests
+    iree::async::cts::util::registry
+    iree::testing::gtest
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+iree_cc_test(
+  NAME
+    sync_semaphore_tests
+  SRCS
+    "${PROJECT_SOURCE_DIR}/runtime/src/iree/async/cts/util/test_main.cc"
+  DEPS
+    ::backends
+    iree::async::cts::sync::semaphore_tests
     iree::async::cts::util::registry
     iree::testing::gtest
 )

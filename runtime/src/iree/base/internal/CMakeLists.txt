@@ -53,6 +53,51 @@ iree_cc_test(
 
 iree_cc_library(
   NAME
+    base64
+  HDRS
+    "base64.h"
+  SRCS
+    "base64.c"
+  DEPS
+    iree::base
+  PUBLIC
+)
+
+iree_cc_test(
+  NAME
+    base64_test
+  SRCS
+    "base64_test.cc"
+  DEPS
+    ::base64
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_fuzz(
+  NAME
+    base64_fuzz
+  SRCS
+    "base64_fuzz.cc"
+  DEPS
+    ::base64
+)
+
+iree_cc_binary_benchmark(
+  NAME
+    base64_benchmark
+  SRCS
+    "base64_benchmark.cc"
+  DEPS
+    ::base64
+    iree::base
+    iree::testing::benchmark
+    iree::testing::benchmark_main
+  TESTONLY
+)
+
+iree_cc_library(
+  NAME
     arena
   HDRS
     "arena.h"
@@ -179,43 +224,6 @@ iree_cc_library(
     iree::base
     iree::base::threading
   PUBLIC
-)
-
-iree_cc_library(
-  NAME
-    flags
-  HDRS
-    "flags.h"
-  SRCS
-    "flags.c"
-  DEPS
-    ::internal
-    iree::base
-    iree::io::file_handle
-  PUBLIC
-)
-
-iree_cc_binary(
-  NAME
-    flags_demo
-  SRCS
-    "flags_demo.c"
-  DEPS
-    ::flags
-    iree::base
-  TESTONLY
-)
-
-iree_lit_test_suite(
-  NAME
-    flags_test
-  SRCS
-    "flags_test.txt"
-  TOOLS
-    ::flags_demo
-    FileCheck
-  LABELS
-    "hostonly"
 )
 
 iree_cc_library(
@@ -355,11 +363,116 @@ iree_cc_test(
 
 iree_cc_library(
   NAME
+    shm
+  HDRS
+    "shm.h"
+  SRCS
+    "shm_posix.c"
+    "shm_win32.c"
+  DEPS
+    ::internal
+    ::memory
+    iree::base
+    iree::base::threading
+  PUBLIC
+)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(iree_base_internal_shm PUBLIC rt)
+endif()
+
+iree_cc_test(
+  NAME
+    shm_test
+  SRCS
+    "shm_test.cc"
+  DEPS
+    ::shm
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_library(
+  NAME
+    spsc_queue
+  HDRS
+    "spsc_queue.h"
+  SRCS
+    "spsc_queue.c"
+  DEPS
+    ::internal
+    iree::base
+    iree::base::core_headers
+  PUBLIC
+)
+
+iree_cc_test(
+  NAME
+    spsc_queue_test
+  SRCS
+    "spsc_queue_test.cc"
+  DEPS
+    ::spsc_queue
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_binary_benchmark(
+  NAME
+    spsc_queue_benchmark
+  SRCS
+    "spsc_queue_benchmark.cc"
+  DEPS
+    ::spsc_queue
+    benchmark
+    iree::testing::benchmark_main
+  TESTONLY
+)
+
+iree_cc_library(
+  NAME
+    mpsc_queue
+  HDRS
+    "mpsc_queue.h"
+  SRCS
+    "mpsc_queue.c"
+  DEPS
+    ::internal
+    iree::base
+    iree::base::core_headers
+  PUBLIC
+)
+
+iree_cc_test(
+  NAME
+    mpsc_queue_test
+  SRCS
+    "mpsc_queue_test.cc"
+  DEPS
+    ::mpsc_queue
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_library(
+  NAME
     span
   HDRS
     "span.h"
   DEPS
 
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
+    sysfs
+  HDRS
+    "sysfs.h"
+  SRCS
+    "sysfs.c"
+  DEPS
+    iree::base
   PUBLIC
 )
 

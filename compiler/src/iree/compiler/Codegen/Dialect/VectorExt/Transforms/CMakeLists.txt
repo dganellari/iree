@@ -24,11 +24,14 @@ iree_cc_library(
     VectorExtTransforms
   HDRS
     "BufferizationInterfaces.h"
+    "DistributionPatterns.h"
     "Passes.h"
     "Passes.h.inc"
     "Transforms.h"
   SRCS
     "BufferizationInterfaces.cpp"
+    "DistributionPatterns.cpp"
+    "LowerTransferGatherOps.cpp"
     "Passes.cpp"
     "VectorExtFoldUnitExtentDims.cpp"
     "VectorizeIREEVectorExtOps.cpp"
@@ -49,9 +52,9 @@ iree_cc_library(
     MLIRTransforms
     MLIRUBDialect
     MLIRVectorDialect
-    MLIRVectorTransforms
     MLIRVectorUtils
     iree::compiler::Codegen::Dialect::VectorExt::IR::IREEVectorExtDialect
+    iree::compiler::Codegen::Interfaces::VectorizableOpInterface
     iree::compiler::Dialect::LinalgExt::IR
     iree::compiler::Dialect::LinalgExt::Utils
   PUBLIC

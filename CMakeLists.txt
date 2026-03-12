@@ -4,7 +4,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-cmake_minimum_required(VERSION 3.21...3.24)
+cmake_minimum_required(VERSION 3.26...3.29)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -652,6 +652,7 @@ include(iree_c_embed_data)
 include(iree_amdgpu_binary)
 include(iree_bitcode_library)
 include(iree_bytecode_module)
+include(iree_hal_executable)
 include(iree_c_module)
 include(iree_python)
 include(iree_lit_test)
@@ -737,15 +738,29 @@ if(IREE_BUILD_PYTHON_BINDINGS)
   # "Bootstrapping" by first looking for the optional Development component
   # seems to be robust generally.
   # See: https://reviews.llvm.org/D118148
-  # If building Python packages, we have a hard requirement on 3.9+.
-  find_package(Python3 3.9 COMPONENTS Interpreter Development NumPy)
-  find_package(Python3 3.9 COMPONENTS Interpreter Development.Module NumPy REQUIRED)
+  # If building Python packages, we have a hard requirement on 3.10+.
+  find_package(Python3 3.10 COMPONENTS Interpreter Development NumPy)
+  find_package(Python3 3.10 COMPONENTS Interpreter Development.Module Development.SABIModule NumPy REQUIRED)
   # Some parts of the build use FindPython instead of FindPython3. Why? No
   # one knows, but they are different. So make sure to bootstrap this one too.
   # Not doing this here risks them diverging, which on multi-Python systems,
   # can be troublesome. Note that nanobind requires FindPython.
   set(Python_EXECUTABLE "${Python3_EXECUTABLE}")
-  find_package(Python 3.9 COMPONENTS Interpreter Development.Module NumPy REQUIRED)
+  find_package(Python 3.10 COMPONENTS Interpreter Development.Module Development.SABIModule NumPy REQUIRED)
+
+  # Auto-detect IREE_ENABLE_PYTHON_STABLE_ABI: enable for CPython 3.12+ with
+  # GIL. Can be overridden by explicitly setting the cache variable.
+  if(NOT DEFINED CACHE{IREE_ENABLE_PYTHON_STABLE_ABI}
+     AND Python3_VERSION VERSION_GREATER_EQUAL "3.12"
+     AND Python3_INTERPRETER_ID STREQUAL "Python"
+     AND TARGET Python::SABIModule
+     AND NOT Python3_SOABI MATCHES "^cpython-[0-9]+t")
+    set(IREE_ENABLE_PYTHON_STABLE_ABI ON CACHE BOOL
+      "Build Python bindings with Stable ABI (abi3) for Python 3.12+")
+  endif()
+  if(IREE_ENABLE_PYTHON_STABLE_ABI)
+    message(STATUS "IREE Python Stable ABI (abi3) enabled")
+  endif()
 elseif(IREE_BUILD_COMPILER OR IREE_BUILD_TESTS)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   set(Python_EXECUTABLE "${Python3_EXECUTABLE}")
@@ -812,7 +827,7 @@ add_custom_target(iree-sample-deps
 )
 
 # Testing rules that require generation will add dependencies to this target.
-# This allows them to be EXCLUDE_FROM_ALL but still invokable.
+# This allows them to be EXCLUDE_FROM_ALL but still invocable.
 add_custom_target(iree-test-deps
   COMMENT
     "Building IREE test deps"
@@ -869,6 +884,11 @@ endif()
 #-------------------------------------------------------------------------------
 # MLIR/LLVM Dependency
 #-------------------------------------------------------------------------------
+
+# Cascade IREE_ENABLE_PYTHON_STABLE_ABI to MLIR.
+if(IREE_ENABLE_PYTHON_STABLE_ABI)
+  set(MLIR_ENABLE_PYTHON_STABLE_ABI ON CACHE BOOL "" FORCE)
+endif()
 
 # Both the IREE and MLIR Python bindings require nanobind. We initialize it here
 # at the top level so that everything uses ours consistently.
@@ -1022,6 +1042,9 @@ if(IREE_ENABLE_CPUINFO)
   endif()
 endif()
 
+# Platform-independent printf implementation (eyalroz/printf).
+add_subdirectory(build_tools/third_party/printf EXCLUDE_FROM_ALL)
+
 # This defines the iree-flatcc-cli target, so we don't use EXCLUDE_FROM_ALL.
 add_subdirectory(build_tools/third_party/flatcc)
 
@@ -1069,6 +1092,7 @@ if(IREE_HAL_DRIVER_CUDA)
 endif()
 
 if(IREE_HAL_DRIVER_HIP)
+  add_subdirectory(build_tools/third_party/hip-api-headers EXCLUDE_FROM_ALL)
   add_subdirectory(build_tools/third_party/rccl EXCLUDE_FROM_ALL)
 endif()
 
@@ -1289,7 +1313,7 @@ endif(IREE_ENABLE_RUNTIME_COVERAGE)
 # environment variable "DESTDIST" on a per invocation basis (i.e. to place under
 # a versioned path, etc).
 #
-# The `iree-install-dist` target includes everthing that is typically included in
+# The `iree-install-dist` target includes everything that is typically included in
 # a distribution tarball.
 #-------------------------------------------------------------------------------
 

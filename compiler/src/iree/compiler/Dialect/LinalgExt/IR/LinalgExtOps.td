@@ -240,7 +240,7 @@ def IREELinalgExt_GatherOp : IREELinalgExt_Op<"gather",
   let hasCanonicalizer = 1;
 }
 
-def IREELinalgExt_MapGatherOp : IREELinalgExt_Op<"map_gather",
+def IREELinalgExt_MapLoadOp : IREELinalgExt_Op<"map_load",
     [DeclareOpInterfaceMethods<TilingInterface,
         ["getIterationDomain",
          "getLoopIteratorTypes",
@@ -250,7 +250,7 @@ def IREELinalgExt_MapGatherOp : IREELinalgExt_Op<"map_gather",
          "getIterationDomainTileFromOperandTiles",
          "getTiledImplementationFromOperandTiles",
          "generateScalarImplementation"]>]> {
-  let summary = [{Gather with a mapping from result indices to source indices.}];
+  let summary = [{Load with a mapping from result indices to source indices.}];
   let description = [{
     Takes two operands, `source` and `output`, and reads every element from
     the `source` based on a computed index mapping to store into the `output`.
@@ -306,16 +306,16 @@ def IREELinalgExt_MapGatherOp : IREELinalgExt_Op<"map_gather",
             transformationBuilder,
         int64_t numOutputIndices);
 
-    // Inline the transformation region of the map_gather op without its
+    // Inline the transformation region of the map_load op without its
     // terminator, replacing the block arguments with the passed
     // `transformBodyIndices`. The `bodyBuilder` function is called with the
     // cloned `Value`s that would have been yielded by the terminator of
     // the inlined transformation body (source indices and padding value).
-    void inlineMapGatherBody(
+    void inlineMapLoadBody(
       OpBuilder &b, Location loc, ValueRange transformBodyIndices,
       function_ref<void(OpBuilder &, Location, ArrayRef<Value>)> bodyBuilder);
 
-    // Return true if the mapGatherOp is an identity transformation, meaning
+    // Return true if the mapLoadOp is an identity transformation, meaning
     // it is just doing a copy from source to output. This is true if the
     // padding is unused (source and output shapes match) and the mapping
     // from output to source index is identity.
@@ -325,14 +325,14 @@ def IREELinalgExt_MapGatherOp : IREELinalgExt_Op<"map_gather",
     // The padding value is the last operand of the yield op.
     Value getPaddingValue();
 
-    // Return true if the map_gather op has vector semantics.
+    // Return true if the map_load op has vector semantics.
     bool isVectorized() {
       return isa<VectorType>(getSource().getType());
     }
 
-    // Creates a MapGatherOp with an identity mapping in the transformation
+    // Creates a MapLoadOp with an identity mapping in the transformation
     // body. Expects the types of `source` and `output` to be the same.
-    static MapGatherOp createIdentityMapGather(OpBuilder &builder,
+    static MapLoadOp createIdentityMapLoad(OpBuilder &builder,
                                                Location loc, Value source,
                                                Value output);
 
@@ -346,7 +346,7 @@ def IREELinalgExt_MapGatherOp : IREELinalgExt_Op<"map_gather",
   let hasCanonicalizer = 1;
 }
 
-def IREELinalgExt_MapScatterOp : IREELinalgExt_Op<"map_scatter",
+def IREELinalgExt_MapStoreOp : IREELinalgExt_Op<"map_store",
     [DeclareOpInterfaceMethods<TilingInterface,
         ["getIterationDomain",
          "getLoopIteratorTypes",
@@ -355,7 +355,7 @@ def IREELinalgExt_MapScatterOp : IREELinalgExt_Op<"map_scatter",
          "getIterationDomainTileFromOperandTiles",
          "getTiledImplementationFromOperandTiles",
          "generateScalarImplementation"]>]> {
-  let summary = [{Scatter with a mapping from source indices to result indices.}];
+  let summary = [{Store with a mapping from source indices to result indices.}];
   let description = [{
     Takes two operands, `input` and `output`, and stores every element of
     `input` to a unique location in `output`. If the operands are tensors, the
@@ -410,7 +410,7 @@ def IREELinalgExt_MapScatterOp : IREELinalgExt_Op<"map_scatter",
     // Returns the mask value.
     Value getMask();
 
-    // Return true if the map_scatter op has vector semantics.
+    // Return true if the map_store op has vector semantics.
     bool isVectorized() {
       return isa<VectorType>(getInputType());
     }
@@ -428,24 +428,24 @@ def IREELinalgExt_MapScatterOp : IREELinalgExt_Op<"map_scatter",
             transformationBuilder,
         int64_t numSourceIndices);
 
-    // Inline the transformation region of the map_scatter op without its
+    // Inline the transformation region of the map_store op without its
     // terminator, replacing the block arguments with the passed
     // `transformBodyIndices`. The `bodyBuilder` function is called with the
     // cloned index `Value`s that would have been yielded by the terminator of
     // the inlined transformation body.
-    void inlineMapScatterBody(
+    void inlineMapStoreBody(
       OpBuilder &b, Location loc, ValueRange transformBodyIndices,
       function_ref<void(OpBuilder &, Location, ArrayRef<Value>)> bodyBuilder);
 
-    // Return true if the mapScatterOp is an identity transformation, meaning
+    // Return true if the mapStoreOp is an identity transformation, meaning
     // it is just doing a copy from input to output. This is true if the mask
     // always evaluates to true, and the mapping from input to output index is
     // identity.
     bool isIdentity();
 
-    // Creates a MapScatterOp with an identity mapping in the transforamtion
+    // Creates a MapStoreOp with an identity mapping in the transformation
     // body. Expects the types of `input` and `output` to be the same.
-    static MapScatterOp createIdentityMapScatter(OpBuilder &builder,
+    static MapStoreOp createIdentityMapStore(OpBuilder &builder,
                                                  Location loc, Value input,
                                                  Value output);
 
@@ -634,19 +634,19 @@ def IREELinalgExt_TopkOp : IREELinalgExt_Op<"topk",[
    A Top-K operation for N-D tensors. Reduces the target dimension from the input
    size N down to K elements based on the supplied binary region.
 
-   Accepts an N-D tensor input consisting of values and an optioanl N-D tensor
+   Accepts an N-D tensor input consisting of values and an optional N-D tensor
    for indices of those values (i32 type). If input indices aren't provided, the
    index mapping is inferred based on the k dim.  Both input values/indices
-   tensors and output values/indicies tensors must have the same shape. Top-K is
+   tensors and output values/indices tensors must have the same shape. Top-K is
    computed along the target dimension (from dimension()). Returns two output
-   tensors of values and the indicies of Top-K results. The output dimensions
+   tensors of values and the indices of Top-K results. The output dimensions
    must match the input save for the dimension that is reduced to K results.
 
-   Region accepts lhs=[next N input] and rhs=[exiting K output] and yeilds an
+   Region accepts lhs=[next N input] and rhs=[exiting K output] and yields an
    i1. If true, the two values are swapped:
      - For Top-K compoarision: >
-     - For Min-K comparision: <
-   Note: when the two values are equal, the first occurence is always selected.
+     - For Min-K comparison: <
+   Note: when the two values are equal, the first occurrence is always selected.
   }];
 
   let arguments = (ins AnyShaped:$values,
@@ -1141,7 +1141,7 @@ def IREELinalgExt_ExpReductionOp : IREELinalgExt_Op<"exp_reduction", [
     0 < e{negative} <= 1.
 
     These properties allow us to compute an online normalization of this
-    function, in which we don't have to compute the `max(x)` as a seperate
+    function, in which we don't have to compute the `max(x)` as a separate
     reduction, but as a running max.
 
     Generally, these properties are hard to infer from a linalg.generic, because
@@ -1327,7 +1327,7 @@ def IREELinalgExt_Im2colOp : IREELinalgExt_Op<"im2col",
                 outs(%out_tile : tensor<1x1x1xf32>) -> tensor<1x1x1xf32>
     ```
     Then, when the tiled op is decomposed, it becomes a loop over the iteration
-    space of the im2col op, whith an extract_slice from the `%in_tile` followed
+    space of the im2col op, with an extract_slice from the `%in_tile` followed
     by an insert_slice to the `%out_tile`. The indices for the extract slice are
     computed using the `m_offset` and `k_offset` as:
     (b, m, k) -> (b, M / 32 + K / (640*3), M % 32 + K % (640*3) / 640, K % 640)
@@ -1454,7 +1454,7 @@ def IREELinalgExt_Im2colOp : IREELinalgExt_Op<"im2col",
     //
     // This method does not find vectorizable dims if output dims are partially
     // collapsed. For example, it computes K dim mapping for standard conv_2d if
-    // the K dim is fully collapsed or fully expanded (inlcuding all input
+    // the K dim is fully collapsed or fully expanded (including all input
     // channel and filter loop dims), but otherwise omits mappings for the K
     // dims.
     SmallVector<SmallVector<int64_t>> getInputToOutputDimVectorizationMap();
@@ -1482,282 +1482,6 @@ def IREELinalgExt_Im2colOp : IREELinalgExt_Op<"im2col",
 
 } // OpGroupNonStructuredOps
 
-//===----------------------------------------------------------------------===//
-// Data tiling ops
-//===----------------------------------------------------------------------===//
-
-def OpGroupDataTilingOps : OpDocGroup {
-  let summary = "Data tiling ops";
-  let description = [{
-    Operations for working with data layouts, padding, encodings, and other
-    properties useful for tiling computations across iteration space dimensions.
-  }];
-}
-
-let opDocGroup = OpGroupDataTilingOps in {
-
-def IREELinalgExt_PackOp : IREELinalgExt_Op<"pack", [
-  AttrSizedOperandSegments,
-  DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface, ["reifyResultShapes"]>,
-  DeclareOpInterfaceMethods<LinalgExtInterface>,
-  DeclareOpInterfaceMethods<TilingInterface,
-    ["getIterationDomain",
-     "generateScalarImplementation"]>,
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
-]>{
-  let summary = [{LinalgExt pack operation for both tensors and buffers.}];
-  let description = [{
-    The pack operation converts an `input` into a tiled and packed layout. The
-    dimensions to be tiled are obtained from `inner_dims_pos` and the size of the
-    tile is obtained from `inner_tiles`. The dimensions listed in `inner_dims_pos`
-    do not need to be contiguous in which case the tile will get transposed.  We
-    handle only full tiles if `padding_value` is not set; it is UB if the tile does
-    not perfectly divide the dimension. If `padding_value` is set, it will pad
-    along high dimensions, i.e., it pads at the bottom and on the right if the
-    input has rank 2, and the result type shape, will be dynamic in any dimension
-    if and only if the input shape is. As optional input, the operation takes
-    `outer_dims_perm` that allows to permute the tiled loops.
-
-    Example KC_to_KCck:
-
-    ```mlir
-    iree_linalg_ext.pack %arg0 inner_dims_pos = [1, 0]
-      inner_tiles = [32, 8] into %arg1 : (memref<128x256xf32> memref<16x8x32x8xf32>)
-    ```
-
-    Example NC_to_NCnc:
-
-    ```mlir
-    iree_linalg_ext.pack %arg0 inner_dims_pos = [0, 1]
-      inner_tiles = [8, 32] into %arg1 : (memref<128x256xf32> memref<16x8x8x32xf32>)
-    ```
-    Example KC_to_CKkc
-
-    ```mlir
-    iree_linalg_ext.pack %arg0 outer_dims_perm = [1, 0] inner_dims_pos = [0, 1]
-      inner_tiles = [32, 8] into %arg1 : (memref<128x256xf32> memref<32x4x32x8xf32>)
-    ```
-
-    In all cases, dimension at position 0 in the input memref (128) is tiled
-    with a factor of 8, while dimension at position 1 (256) is tiled with a factor
-    of 32. In the KC_to_KCck example, the point loops are interchanged, while in the
-    KC_to_CKkc example the tiled loops.
-
-    Example NC_to_NCnc with padding:
-
-    ```mlir
-    iree_linalg_ext.pack %arg padding_value(%pad : f32) inner_dims_pos = [0, 1]
-      inner_tiles = [8, 2] into %arg1 : (memref<13x15xf32> memref<2x8x8x2xf32>)
-    ```
-
-  }];
-
-  let arguments = (ins AnyShaped:$input,
-    AnyShaped:$output,
-    DefaultValuedOptionalAttr<DenseI64ArrayAttr, "{}">:$outer_dims_perm,
-    DenseI64ArrayAttr:$inner_dims_pos,
-    Variadic<Index>:$inner_tiles,
-    DenseI64ArrayAttr:$static_inner_tiles,
-    Optional<AnyType>:$padding_value);
-
-  let results = (outs Variadic<AnyRankedTensor>:$results);
-  let assemblyFormat = [{
-    attr-dict
-    $input
-    (`padding_value` `(` $padding_value^ `:` type($padding_value) `)`)?
-    (`outer_dims_perm` `=` $outer_dims_perm^)?
-    `inner_dims_pos` `=` $inner_dims_pos
-    `inner_tiles` `=`
-    custom<DynamicIndexList>($inner_tiles, $static_inner_tiles)
-    `into` $output `:` `(` type($input) type($output) `)`
-     (`->` type($results)^)?
-  }];
-
-  let builders = [
-    OpBuilder<(ins "Value":$source, "Value":$output,
-      "ArrayRef<int64_t>":$innerDimsPos,
-      "ArrayRef<OpFoldResult>":$innerTiles,
-      CArg<"std::optional<Value>", "std::nullopt">:$paddingValue,
-      CArg<"ArrayRef<int64_t>", "{}">:$outerDimsPerm)>
-  ];
-
-  let extraClassDeclaration = extraLinalgExtOpClassDeclaration # [{
-
-    // Return the output rank.
-    int64_t getOutputRank() {
-      return  getOutputType().getRank();
-    }
-
-    // Return the output type.
-    ShapedType getOutputType() {
-      return cast<ShapedType>(getOutput().getType());
-    }
-
-    // Return the input type.
-    ShapedType getInputType() {
-      return cast<ShapedType>(getInput().getType());
-    }
-
-    // Return the output shape.
-    ArrayRef<int64_t> getOutputShape() {
-      return getOutputType().getShape();
-    }
-
-    // Return the input shape.
-    ArrayRef<int64_t> getInputShape() {
-      return getInputType().getShape();
-    }
-
-    // Return the element type.
-    Type getElementType() {
-      return getInputType().getElementType();
-    }
-
-    // Return the rank of the input operand.
-    int64_t getInputRank() {
-      return getInputType().getRank();
-    }
-
-    // Return the tile sizes.
-    SmallVector<OpFoldResult> getMixedTiles();
-    SmallVector<int64_t> getStaticTiles();
-
-    // Return a mapping from positions `dims_pos` to their tile factors.
-    DenseMap<int64_t, OpFoldResult> getDimAndTileMapping();
-
-    // Method to get the shape of the result as `SmallVector<OpFoldResult>`.
-    // This is a static method to allow getting the shape of the destination
-    // expected while creating a `pack` op.
-    static SmallVector<OpFoldResult> getResultShape(OpBuilder &builder,
-        Location loc, ArrayRef<OpFoldResult> sourceDims,
-        ArrayRef<OpFoldResult> innerTileDims, ArrayRef<int64_t> innerDimsPos,
-        ArrayRef<int64_t> outerDimsPerm = {});
-    // Method to return the shape of the result as `SmallVector<OpFoldResult>`.
-    SmallVector<OpFoldResult> getResultShape(OpBuilder &builder);
-
-    // Method to get the `ShapedType` of the result. This is a static method
-    // to allow getting the type of the destination while creating the `pack`
-    // op.
-    static ShapedType getPackedType(ShapedType sourceType,
-        ArrayRef<int64_t> innerTileSizes, ArrayRef<int64_t> innerDimsPos,
-        ArrayRef<int64_t> outerDimsPerm = {});
-
-    // Method to implement for specifying output range for
-    // DestinationStyleOpInterface
-    MutableOperandRange getDpsInitsMutable();
-  }];
-}
-
-def IREELinalgExt_UnPackOp : IREELinalgExt_Op<"unpack", [
-  DeclareOpInterfaceMethods<ReifyRankedShapedTypeOpInterface, ["reifyResultShapes"]>,
-  DeclareOpInterfaceMethods<LinalgExtInterface>,
-  DeclareOpInterfaceMethods<TilingInterface,
-    ["getIterationDomain",
-     "generateScalarImplementation"]>,
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
-]>{
-  let summary = [{LinalgExt unpack operation for both tensors and buffers.}];
-
-  let description = [{
-    The unpack operation converts a tiled and packed input to an unpacked
-    output. See `pack` for more details on `inner_tiles` and `dims_pos`; it is UB
-    if the tile does not perfectly divide the dimension. Optionally, the operation
-    also supports permuting the tiled loops.
-
-    Example KCck_to_KC:
-
-    ```mlir
-    iree_linalg_ext.unpack %arg0 dims_pos = [1, 0]
-      inner_tiles = [32, 8] into %arg1 : (memref<16x8x32x8xf32> memref<128x256xf32>)
-    ```
-
-    Example NCnc_to_NC:
-
-    ```mlir
-    iree_linalg_ext.unpack %arg0 dims_pos = [0, 1]
-      inner_tiles = [8, 32] into %arg1 : (memref<16x8x8x32xf32> memref<128x256xf32>)
-    ```
-
-    Example CKkc_to_KC:
-
-    ```mlir
-    iree_linalg_ext.unpack %arg1 outer_dims_perm = [1, 0] inner_dims_pos = [0, 1]
-      inner_tiles = [32, 8] into %arg0 : (memref<32x4x32x8xf32> memref<128x256xf32>)
-    ```
-  }];
-
-  let arguments = (ins AnyShaped:$input,
-    AnyShaped:$output,
-    DefaultValuedOptionalAttr<DenseI64ArrayAttr, "{}">:$outer_dims_perm,
-    DefaultValuedAttr<DenseI64ArrayAttr, "{}">:$inner_dims_pos,
-    Variadic<Index>:$inner_tiles,
-    DenseI64ArrayAttr:$static_inner_tiles);
-
-  let results = (outs Variadic<AnyRankedTensor>:$results);
-  let assemblyFormat = [{
-    attr-dict
-    $input
-    (`outer_dims_perm` `=` $outer_dims_perm^)?
-    `inner_dims_pos` `=` $inner_dims_pos
-    `inner_tiles` `=`
-    custom<DynamicIndexList>($inner_tiles, $static_inner_tiles)
-    `into` $output `:` `(` type($input) type($output) `)`
-     (`->` type($results)^)?
-  }];
-
-  let builders = [
-    OpBuilder<(ins "Value":$source, "Value":$output,
-    "ArrayRef<int64_t>":$innerDimsPos,
-    "ArrayRef<OpFoldResult>":$innerTiles,
-    CArg<"ArrayRef<int64_t>", "{}">:$outerDimsPerm)>
-  ];
-
-  let extraClassDeclaration = extraLinalgExtOpClassDeclaration # [{
-
-    // Return the output rank.
-    int64_t getOutputRank() {
-      return  getOutputType().getRank();
-    }
-
-    // Return the output type.
-    ShapedType getOutputType() {
-      return cast<ShapedType>(getOutput().getType());
-    }
-
-    // Return the input type.
-    ShapedType getInputType() {
-      return cast<ShapedType>(getInput().getType());
-    }
-
-    // Return the output shape.
-    ArrayRef<int64_t> getOutputShape() {
-      return getOutputType().getShape();
-    }
-
-    // Return the input shape.
-    ArrayRef<int64_t> getInputShape() {
-      return getInputType().getShape();
-    }
-
-    // Return the rank of the input operand.
-    int64_t getInputRank() {
-      return getInputType().getRank();
-    }
-
-    // Return the tile sizes.
-    SmallVector<OpFoldResult> getMixedTiles();
-    SmallVector<int64_t> getStaticTiles();
-
-    // Return a mapping from positions `dims_pos` to their tile factors.
-    DenseMap<int64_t, OpFoldResult> getDimAndTileMapping();
-
-    // Method to implement for specifying output range for
-    // DestinationStyleOpInterface
-    MutableOperandRange getDpsInitsMutable();
-  }];
-}
-
-} // OpGroupDataTilingOps
 
 //===----------------------------------------------------------------------===//
 // Winograd ops

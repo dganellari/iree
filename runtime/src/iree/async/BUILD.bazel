@@ -44,6 +44,7 @@ iree_runtime_cc_library(
         "frontier_tracker.c",
         "notification.c",
         "operation.c",
+        "primitive.c",
         "proactor.c",
         "region.c",
         "semaphore.c",
@@ -124,15 +125,27 @@ iree_runtime_cc_library(
         "//build_tools/bazel:iree_is_windows": [
             "//runtime/src/iree/async/platform/iocp",
         ],
-        "//conditions:default": [
+        "//build_tools/bazel:iree_is_macos": [
             "//runtime/src/iree/async/platform/posix",
         ],
+        "//conditions:default": [],
     }),
 )
 
 #===------------------------------------------------------------------------===#
 # Tests
 #===------------------------------------------------------------------------===#
+
+iree_runtime_cc_test(
+    name = "primitive_test",
+    srcs = ["primitive_test.cc"],
+    deps = [
+        ":async",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
 
 iree_runtime_cc_test(
     name = "address_test",

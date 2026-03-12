@@ -78,7 +78,6 @@ iree_cc_library(
     "KernelConfig.cpp"
     "LLVMGPUAssignConstantOrdinals.cpp"
     "LLVMGPUCastAddressSpaceFunction.cpp"
-    "LLVMGPUCastTypeToFitMMA.cpp"
     "LLVMGPUConfigureTensorLayouts.cpp"
     "LLVMGPULinkExecutables.cpp"
     "LLVMGPULowerExecutableTarget.cpp"
@@ -94,7 +93,6 @@ iree_cc_library(
     "ROCDLBufferInstructionsOptimization.cpp"
     "ROCDLConfigureBufferInstructions.cpp"
     "ROCDLLoadToTransposeLoad.cpp"
-    "ROCDLLowerExecutableTarget.cpp"
     "ROCDLPrefetching.cpp"
     "Verifiers.cpp"
   DEPS

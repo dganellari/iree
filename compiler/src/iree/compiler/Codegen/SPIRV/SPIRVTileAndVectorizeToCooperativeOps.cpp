@@ -362,7 +362,7 @@ public:
       return WalkResult::advance();
     });
     if (!rootOp) {
-      funcOp.emitError("expected lowering confg on a (batch) matmul op");
+      funcOp.emitError("expected lowering config on a (batch) matmul op");
       return signalPassFailure();
     }
 
@@ -389,8 +389,9 @@ public:
         return signalPassFailure();
       }
 
-      RewritePatternSet canonicalizationPatterns =
-          linalg::getLinalgTilingCanonicalizationPatterns(context);
+      RewritePatternSet canonicalizationPatterns(context);
+      linalg::populateLinalgTilingCanonicalizationPatterns(
+          canonicalizationPatterns);
       SmallVector<int64_t> numWorkgroups = getStaticNumWorkgroups(funcOp);
       populateFoldAffineMinInDistributedLoopsPatterns(canonicalizationPatterns,
                                                       numWorkgroups);

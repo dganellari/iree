@@ -33,7 +33,7 @@ hal.executable public @main {
         %c0 = arith.constant 0 : index
         %alloc = memref.alloc() : memref<1x1x16x40xi8, #gpu.address_space<workgroup>>
         %alloc_0 = memref.alloc() : memref<1x32x40xi8, #gpu.address_space<workgroup>>
-        %thread_id_x = gpu.thread_id  x upper_bound 128
+        %thread_id_x = gpu.thread_id x upper_bound 128
         %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : memref<32x32x16x16xi8, #hal.descriptor_type<storage_buffer>>
         %3 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) alignment(64) offset(%c0) flags(ReadOnly) : memref<32x32x32x3x3xi8, #hal.descriptor_type<storage_buffer>>
         %5:2 = affine.delinearize_index %thread_id_x into (16, 8) : index, index
@@ -82,7 +82,7 @@ hal.executable public @main {
   }
 }
 // The purpose of this test is to make sure that we dont merge basic blocks
-// If some pass accidentaly does this then we would have arguments to
+// If some pass accidentally does this then we would have arguments to
 // ^bb4 and also have 4 preds instead of 2 due to back edges.
 // CHECK-LABEL: func @no_merge_basic_blocks(
 //       CHECK:   ^bb4:

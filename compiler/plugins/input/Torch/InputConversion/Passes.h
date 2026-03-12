@@ -14,7 +14,7 @@
 namespace mlir::iree_compiler::TorchInput {
 
 // The following is a hard-coded list of ops we don't want to decompose in the
-// torch dialect, since they have disadvantageous decompositons for the
+// torch dialect, since they have disadvantageous decompositions for the
 // torch-to-linalg path. For example, decomposing `aten.flatten.using_ints` to
 // `aten.view` simply destroys useful information about what kind of reshape is
 // being performed, and hinders our ability, in some cases, to lower this to a
@@ -43,6 +43,9 @@ struct TorchToIREELoweringPipelineOptions
           "program inputs. This buffer will be used for storing transient "
           "memory and must be provided by the user."),
       llvm::cl::init(false)};
+  Option<bool> enableShapeRefinement{*this, "enable-shape-refinement",
+                                     llvm::cl::desc("Enable shape refinement"),
+                                     llvm::cl::init(false)};
 };
 
 // Creates a pipeline that lowers from the torch backend contract to IREE.

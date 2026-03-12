@@ -4,7 +4,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-load("//build_tools/bazel:build_defs.oss.bzl", "iree_compiler_cc_library", "iree_gentbl_cc_library", "iree_td_library")
+load("//build_tools/bazel:build_defs.oss.bzl", "iree_compiler_cc_library", "iree_gentbl_cc_library", "iree_tablegen_doc", "iree_td_library")
 load("//build_tools/bazel:enforce_glob.bzl", "enforce_glob")
 
 package(
@@ -16,6 +16,7 @@ package(
 exports_files([
     "IREECPUAttrs.td",
     "IREECPUDialect.td",
+    "IREECPUEnums.td",
 ])
 
 iree_td_library(
@@ -25,6 +26,7 @@ iree_td_library(
         [
             "IREECPUAttrs.td",
             "IREECPUDialect.td",
+            "IREECPUEnums.td",
         ],
         include = ["*.td"],
     ),
@@ -50,10 +52,13 @@ iree_compiler_cc_library(
         "IREECPUAttrs.h.inc",
         "IREECPUDialect.cpp.inc",
         "IREECPUDialect.h.inc",
+        "IREECPUEnums.cpp.inc",
+        "IREECPUEnums.h.inc",
     ],
     deps = [
         ":IREECPUAttrs",
         ":IREECPUDialectGen",
+        ":IREECPUEnums",
         "//compiler/src/iree/compiler/Codegen/Dialect/Codegen/IR:IREECodegenDialect",
         "//compiler/src/iree/compiler/Codegen/Dialect/Codegen/Utils",
         "//compiler/src/iree/compiler/Dialect/Encoding/IR",
@@ -62,6 +67,7 @@ iree_compiler_cc_library(
         "@llvm-project//mlir:DialectUtils",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:LinalgDialect",
+        "@llvm-project//mlir:LinalgInterfaces",
         "@llvm-project//mlir:Parser",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TensorDialect",
@@ -86,6 +92,29 @@ iree_gentbl_cc_library(
 )
 
 iree_gentbl_cc_library(
+    name = "IREECPUEnums",
+    tbl_outs = [
+        (
+            [
+                "--gen-enum-decls",
+                "--dialect=iree_cpu",
+            ],
+            "IREECPUEnums.h.inc",
+        ),
+        (
+            [
+                "--gen-enum-defs",
+                "--dialect=iree_cpu",
+            ],
+            "IREECPUEnums.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "IREECPUEnums.td",
+    deps = [":td_files"],
+)
+
+iree_gentbl_cc_library(
     name = "IREECPUAttrs",
     tbl_outs = [
         (
@@ -103,4 +132,21 @@ iree_gentbl_cc_library(
         ":td_files",
         "@llvm-project//mlir:SCFDeviceMappingInterfacesIncGen",
     ],
+)
+
+iree_tablegen_doc(
+    name = "IREECPUDialectDocGen",
+    category = "Dialects",
+    tbl_outs = [
+        (
+            [
+                "--gen-dialect-doc",
+                "--dialect=iree_cpu",
+            ],
+            "IREECPUDialect.md",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "IREECPUAttrs.td",
+    deps = [":td_files"],
 )

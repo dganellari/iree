@@ -384,9 +384,29 @@ TEST_P(ResetTest, Reset_CloseWithUnreadData) {
   iree_async_socket_release(client);
   client = nullptr;
 
-  // Server tries to send more data. Should eventually get an error.
-  // The first send might succeed (buffered), but subsequent operations
-  // should fail once the RST is received.
+  // Submit a recv to force the kernel to process the RST. On loopback,
+  // LINGER_ZERO RST is delivered synchronously within close(), so by this
+  // point the server socket's kernel buffer already has the RST queued.
+  // readv() fails immediately with ECONNRESET, setting sticky failure on the
+  // socket. All subsequent eager sends then hit the sticky failure check and
+  // fail without attempting writev().
+  {
+    char rst_probe_buffer[1] = {0};
+    iree_async_span_t rst_probe_span =
+        iree_async_span_from_ptr(rst_probe_buffer, sizeof(rst_probe_buffer));
+    iree_async_socket_recv_operation_t rst_probe_op;
+    CompletionTracker rst_probe_tracker;
+    InitRecvOperation(&rst_probe_op, server, &rst_probe_span, 1,
+                      CompletionTracker::Callback, &rst_probe_tracker);
+    IREE_ASSERT_OK(
+        iree_async_proactor_submit_one(proactor_, &rst_probe_op.base));
+    PollUntil(/*min_completions=*/1,
+              /*total_budget=*/iree_make_duration_ms(5000));
+    iree_status_ignore(rst_probe_tracker.ConsumeStatus());
+  }
+
+  // Server tries to send more data. The socket has sticky failure from the
+  // recv above, so each eager send fails immediately.
   const char* more_data = "Sending after RST";
   iree_async_span_t more_span =
       iree_async_span_from_ptr((void*)more_data, strlen(more_data));

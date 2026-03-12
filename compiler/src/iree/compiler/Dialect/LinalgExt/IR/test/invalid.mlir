@@ -1,15 +1,5 @@
 // RUN: iree-opt --split-input-file --verify-diagnostics %s
 
-func.func @linalg_ext_op_interface_mixed_semantics(
-    %input: memref<256xf32>, %output: tensor<8x32xf32>
-) -> tensor<8x32xf32> {
-  // expected-error@+1 {{expected operation that implements LinalgExtInterface to have either pure buffer semantics or pure tensor semantics}}
-  %0 = iree_linalg_ext.pack %input inner_dims_pos = [0] inner_tiles = [32] into %output : (memref<256xf32> tensor<8x32xf32>) -> tensor<8x32xf32>
-  return %0 : tensor<8x32xf32>
-}
-
-// -----
-
 func.func @sort_invalid_dimension(%arg0: tensor<128xi32>) -> tensor<128xi32> {
   // expected-error @+1 {{dimension must be within (0, 1]}}
   %0 = iree_linalg_ext.sort dimension(1)
@@ -483,11 +473,11 @@ func.func @gather_dim_map_mismatch(
 
 // -----
 
-func.func @map_scatter_mixed_element_types(
+func.func @map_store_mixed_element_types(
     %input: memref<4xf16>, %output: memref<4xf32>
 ) {
   // expected-error@+1 {{expected input and output element types to match}}
-  iree_linalg_ext.map_scatter %input into %output {
+  iree_linalg_ext.map_store %input into %output {
     ^bb0(%idx0: index):
       %mask = arith.constant true
       iree_linalg_ext.yield %idx0, %mask : index, i1
@@ -497,11 +487,11 @@ func.func @map_scatter_mixed_element_types(
 
 // -----
 
-func.func @map_scatter_wrong_num_arguments(
+func.func @map_store_wrong_num_arguments(
     %input: memref<4xf32>, %output: memref<4xf32>
 ) {
   // expected-error@+1 {{expected number of block arguments to be equal to the input rank}}
-  iree_linalg_ext.map_scatter %input into %output {
+  iree_linalg_ext.map_store %input into %output {
     ^bb0(%idx0: index, %idx1: index):
       %mask = arith.constant true
       iree_linalg_ext.yield %idx0, %mask : index, i1
@@ -511,11 +501,11 @@ func.func @map_scatter_wrong_num_arguments(
 
 // -----
 
-func.func @map_scatter_wrong_argument_types(
+func.func @map_store_wrong_argument_types(
     %input: memref<4xf32>, %output: memref<4xf32>
 ) {
   // expected-error@+1 {{expected block arguments to be index types}}
-  iree_linalg_ext.map_scatter %input into %output {
+  iree_linalg_ext.map_store %input into %output {
     ^bb0(%idx0: i64):
       %mask = arith.constant true
       %idx_cast = arith.index_cast %idx0 : i64 to index
@@ -526,10 +516,10 @@ func.func @map_scatter_wrong_argument_types(
 
 // -----
 
-func.func @map_scatter_wrong_yielded_types(
+func.func @map_store_wrong_yielded_types(
     %input: memref<4xf32>, %output: memref<4xf32>
 ) {
-  iree_linalg_ext.map_scatter %input into %output {
+  iree_linalg_ext.map_store %input into %output {
     ^bb0(%idx0: index):
       %mask = arith.constant true
       %idx_cast = arith.index_cast %idx0 : index to i64
@@ -541,10 +531,10 @@ func.func @map_scatter_wrong_yielded_types(
 
 // -----
 
-func.func @map_scatter_wrong_mask_type(
+func.func @map_store_wrong_mask_type(
     %input: memref<4xf32>, %output: memref<4xf32>
 ) {
-  iree_linalg_ext.map_scatter %input into %output {
+  iree_linalg_ext.map_store %input into %output {
     ^bb0(%idx0: index):
       %mask = arith.constant 1 : i32
       // expected-error@+1 {{expected yielded mask to be i1 type}}
@@ -557,10 +547,10 @@ func.func @map_scatter_wrong_mask_type(
 
 // This test uses generic format, because the custom parser would otherwise
 // insert a terminator due to the SingleBlockImplicitTerminator trait.
-func.func @map_scatter_no_terminator(
+func.func @map_store_no_terminator(
     %input: memref<4xf32>, %output: memref<4xf32>
 ){
-  "iree_linalg_ext.map_scatter"(%input, %output) ({
+  "iree_linalg_ext.map_store"(%input, %output) ({
   ^bb0(%idx0: index):
     // expected-error@+1 {{block with no terminator}}
     %0 = "arith.constant"() <{value = true}> : () -> i1
@@ -570,10 +560,10 @@ func.func @map_scatter_no_terminator(
 
 // -----
 
-func.func @map_scatter_wrong_num_yielded_values(
+func.func @map_store_wrong_num_yielded_values(
     %input: memref<4xf32>, %output: memref<4xf32>
 ) {
-  iree_linalg_ext.map_scatter %input into %output {
+  iree_linalg_ext.map_store %input into %output {
     ^bb0(%idx0: index):
       // expected-error@+1 {{expected transformation_region to yield a value for each output dimension and a mask}}
       iree_linalg_ext.yield %idx0 : index
@@ -583,11 +573,11 @@ func.func @map_scatter_wrong_num_yielded_values(
 
 // -----
 
-func.func @map_scatter_0D(
+func.func @map_store_0D(
     %input: vector<f32>, %output: memref<4xf32>
 ) {
   // expected-error@+1 {{expected input type to have non-zero rank}}
-  iree_linalg_ext.map_scatter %input into %output {
+  iree_linalg_ext.map_store %input into %output {
     ^bb0():
       %mask = arith.constant true
       %zero = arith.constant 0 : index
@@ -987,109 +977,6 @@ func.func @topk_invalid(%input_values: tensor<3x10xf32>, %input_indices: tensor<
           iree_linalg_ext.yield %0 : i1
         } -> tensor<2x3xf32>, tensor<2x3xi32>
   return %0#0, %0#1 : tensor<2x3xf32>, tensor<2x3xi32>
-}
-
-// -----
-
-func.func @pack_invalid(%input: tensor<256x128xf32>, %output: tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32> {
-  // expected-error@+1 {{the shape of output is not large enough to hold the packed data. Expected at least 'tensor<8x8x16x32xf32>', got 'tensor<8x8x32x16xf32>'}}
-  %0 = iree_linalg_ext.pack %input inner_dims_pos = [1, 0] inner_tiles = [16, 32] into %output : (tensor<256x128xf32> tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32>
-  return %0 : tensor<8x8x32x16xf32>
-}
-
-// -----
-
-func.func @pack_invalid(%input: tensor<256x128xf32>, %output: tensor<8x8x16x33xf32>) -> tensor<8x8x16x33xf32> {
-  // expected-error@+1 {{invalid tile factor provided. Only full tiles are supported when padding_value is not set}}
-  %0 = iree_linalg_ext.pack %input inner_dims_pos = [1, 0] inner_tiles = [16, 33] into %output : (tensor<256x128xf32> tensor<8x8x16x33xf32>) -> tensor<8x8x16x33xf32>
-  return %0 : tensor<8x8x16x33xf32>
-}
-
-// -----
-
-func.func @pad_and_pack_invalid_type(%input: tensor<13x15xf32>, %output: tensor<2x8x8x2xf32>, %pad: i32) -> tensor<2x8x8x2xf32> {
-  // expected-error@+1 {{expected padding_value has 'f32' but got: 'i32'}}
-  %0 = iree_linalg_ext.pack %input padding_value(%pad: i32) inner_dims_pos = [0, 1] inner_tiles = [8, 2] into %output : (tensor<13x15xf32> tensor<2x8x8x2xf32>) -> tensor<2x8x8x2xf32>
-  return %0 : tensor<2x8x8x2xf32>
-}
-
-// -----
-
-func.func @pack_invalid(%input: tensor<256x128xf32>, %output: tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32> {
-  // expected-error@+1 {{invalid inner_dims_pos vector}}
-  %0 = iree_linalg_ext.pack %input inner_dims_pos = [2, 0] inner_tiles = [2, 2] into %output : (tensor<256x128xf32> tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32>
-  return %0 : tensor<8x8x32x16xf32>
-}
-
-// -----
-
-func.func @pack_invalid(%input: tensor<256x128xf32>, %output: tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32> {
-  // expected-error@+1 {{invalid tile factor}}
-  %0 = iree_linalg_ext.pack %input inner_dims_pos = [1, 0] inner_tiles = [0, 2] into %output : (tensor<256x128xf32> tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32>
-  return %0 : tensor<8x8x32x16xf32>
-}
-
-// -----
-
-// duplicate element in `inner_dims_pos`, fail.
-func.func @pack_invalid(%input: tensor<256x128xf32>, %output: tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32> {
-  // expected-error@+1 {{invalid inner_dims_pos vector}}
-  %0 = iree_linalg_ext.pack %input inner_dims_pos = [1, 1] inner_tiles = [2, 2] into %output : (tensor<256x128xf32> tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32>
-  return %0 : tensor<8x8x32x16xf32>
-}
-
-// -----
-
-func.func @unpack_invalid(%output: tensor<256x128xf32>, %input: tensor<8x8x32x16xf32>) -> tensor<256x128xf32> {
-  // expected-error@+1 {{the shape of output is not large enough to hold the packed data. Expected at least 'tensor<8x32x4x32xf32>', got 'tensor<8x8x32x16xf32>'}}
-  %0 = iree_linalg_ext.unpack %input inner_dims_pos = [1, 0] inner_tiles = [4, 32] into %output : (tensor<8x8x32x16xf32> tensor<256x128xf32>) -> tensor<256x128xf32>
-  return %0 : tensor<256x128xf32>
-}
-
-// -----
-
-// duplicate element in `outer_dims_perm`, fail.
-func.func @pack_invalid(%input: tensor<256x128xf32>, %output: tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32> {
-  // expected-error@+1 {{invalid outer_dims_perm vector}}
-  %0 = iree_linalg_ext.pack %input outer_dims_perm = [1, 1] inner_dims_pos = [0, 1] inner_tiles = [2, 2] into %output : (tensor<256x128xf32> tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32>
-  return %0 : tensor<8x8x32x16xf32>
-}
-
-// -----
-
-// duplicate element in `outer_dims_perm`, fail.
-func.func @pack_invalid(%input: tensor<256x128xf32>, %output: tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32> {
-  // expected-error@+1 {{invalid outer_dims_perm vector}}
-  %0 = iree_linalg_ext.unpack %output outer_dims_perm = [1, 1] inner_dims_pos = [0, 1] inner_tiles = [2, 2] into %input : (tensor<8x8x32x16xf32> tensor<256x128xf32>) -> tensor<256x128xf32>
-  return %0 : tensor<256x128xf32>
-}
-
-// -----
-
-// `outer_dims_perm` is out of bound.
-func.func @pack_invalid(%input: tensor<256x128xf32>, %output: tensor<8x8x32x16xf32>) -> tensor<8x8x32x16xf32> {
-  // expected-error@+1 {{invalid outer_dims_perm vector}}
-  %0 = iree_linalg_ext.unpack %output outer_dims_perm = [2, 1] inner_dims_pos = [0, 1] inner_tiles = [2, 2] into %input : (tensor<8x8x32x16xf32> tensor<256x128xf32>) -> tensor<256x128xf32>
-  return %0 : tensor<256x128xf32>
-}
-
-// -----
-func.func @pack_mismatch_inner_tile_size_and_output_shape(
-  %input : tensor<?x?xf32>, %output : tensor<?x?x8x8xf32>) -> tensor<?x?x8x8xf32> {
-  // expected-error@+1 {{mismatch in inner tile sizes specified and shaped of tiled dimension in the packed type}}
-  %0 = iree_linalg_ext.pack %input inner_dims_pos = [0, 1] inner_tiles = [8, 4] into %output
-      : (tensor<?x?xf32> tensor<?x?x8x8xf32>) -> tensor<?x?x8x8xf32>
-  return %0 : tensor<?x?x8x8xf32>
-}
-
-// -----
-
-func.func @unpack_mismatch_inner_tile_size_and_output_shape(
-  %input : tensor<?x?x8x8xf32>, %output : tensor<?x?xf32>) -> tensor<?x?xf32> {
-  // expected-error@+1 {{mismatch in inner tile sizes specified and shaped of tiled dimension in the packed type}}
-  %0 = iree_linalg_ext.unpack %input inner_dims_pos = [0, 1] inner_tiles = [8, 4] into %output
-      : (tensor<?x?x8x8xf32> tensor<?x?xf32>) -> tensor<?x?xf32>
-  return %0 : tensor<?x?xf32>
 }
 
 // -----
@@ -1885,12 +1772,12 @@ func.func @index_op_invalid_dim(%arg0 : tensor<?xindex>) -> tensor<?xindex> {
 
 // -----
 
-func.func @map_gather_mixed_element_types(
+func.func @map_load_mixed_element_types(
     %source: memref<4xf16>, %output: memref<4xf32>
 ) {
   %cst = arith.constant 0.0 : f16
   // expected-error@+1 {{expected source and output element types to match}}
-  iree_linalg_ext.map_gather %source into %output {
+  iree_linalg_ext.map_load %source into %output {
   ^bb0(%idx0: index):
     %pad = arith.constant 0.0 : f16
     iree_linalg_ext.yield %idx0, %pad : index, f16
@@ -1900,11 +1787,11 @@ func.func @map_gather_mixed_element_types(
 
 // -----
 
-func.func @map_gather_wrong_num_arguments(
+func.func @map_load_wrong_num_arguments(
     %source: memref<4xf32>, %output: memref<4xf32>
 ) {
   // expected-error@+1 {{expected number of block arguments to be equal to the output rank}}
-  iree_linalg_ext.map_gather %source into %output {
+  iree_linalg_ext.map_load %source into %output {
   ^bb0(%idx0: index, %idx1: index):
     %pad = arith.constant 0.0 : f32
     iree_linalg_ext.yield %idx0, %pad : index, f32
@@ -1914,11 +1801,11 @@ func.func @map_gather_wrong_num_arguments(
 
 // -----
 
-func.func @map_gather_wrong_argument_types(
+func.func @map_load_wrong_argument_types(
     %source: memref<4xf32>, %output: memref<4xf32>
 ) {
   // expected-error@+1 {{expected block arguments to be index types}}
-  iree_linalg_ext.map_gather %source into %output {
+  iree_linalg_ext.map_load %source into %output {
   ^bb0(%idx0: i64):
     %pad = arith.constant 0.0 : f32
     %idx_cast = arith.index_cast %idx0 : i64 to index
@@ -1929,10 +1816,10 @@ func.func @map_gather_wrong_argument_types(
 
 // -----
 
-func.func @map_gather_wrong_yielded_index_types(
+func.func @map_load_wrong_yielded_index_types(
     %source: memref<4xf32>, %output: memref<4xf32>
 ) {
-  iree_linalg_ext.map_gather %source into %output {
+  iree_linalg_ext.map_load %source into %output {
   ^bb0(%idx0: index):
     %pad = arith.constant 0.0 : f32
     %idx_cast = arith.index_cast %idx0 : index to i64
@@ -1944,10 +1831,10 @@ func.func @map_gather_wrong_yielded_index_types(
 
 // -----
 
-func.func @map_gather_wrong_padding_type(
+func.func @map_load_wrong_padding_type(
     %source: memref<4xf32>, %output: memref<4xf32>
 ) {
-  iree_linalg_ext.map_gather %source into %output {
+  iree_linalg_ext.map_load %source into %output {
   ^bb0(%idx0: index):
     %pad = arith.constant 0.0 : f16
     // expected-error@+1 {{expected yielded padding value type to match source element type}}
@@ -1958,10 +1845,10 @@ func.func @map_gather_wrong_padding_type(
 
 // -----
 
-func.func @map_gather_wrong_num_yielded_values(
+func.func @map_load_wrong_num_yielded_values(
     %source: memref<4xf32>, %output: memref<4xf32>
 ) {
-  iree_linalg_ext.map_gather %source into %output {
+  iree_linalg_ext.map_load %source into %output {
   ^bb0(%idx0: index):
     // expected-error@+1 {{expected transformation_region to yield a value for each source dimension and a padding value}}
     iree_linalg_ext.yield %idx0 : index

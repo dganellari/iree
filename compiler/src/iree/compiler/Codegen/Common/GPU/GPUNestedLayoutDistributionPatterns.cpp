@@ -5,11 +5,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include <cstdint>
-#include "iree/compiler/Codegen/Common/GPU/GPUPatterns.h"
 #include "iree/compiler/Codegen/Common/GPU/GPUVectorDistribution.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/VectorExt/IR/VectorExtDialect.h"
+#include "iree/compiler/Codegen/Dialect/VectorExt/Transforms/DistributionPatterns.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "iree/compiler/Utils/Indexing.h"
@@ -34,7 +34,7 @@
 
 namespace mlir::iree_compiler {
 
-using namespace mlir::iree_compiler::IREE::VectorExt;
+using namespace IREE::VectorExt;
 using VectorValue = TypedValue<VectorType>;
 
 static bool isBroadcast(AffineExpr expr) {
@@ -253,22 +253,22 @@ static VectorValue getSlicedPermutedValue(PatternRewriter &rewriter,
 /// Firstly, this will transpose the vector in a way sliced out
 /// dims become outermost. Then it performs a vector.extract
 /// remove the dims that are not present in the results of the map.
-/// Note that the implementation is similiar to vector.extract_stride_slice
+/// Note that the implementation is similar to vector.extract_stride_slice
 /// but with projecting out the indexed/sliced dimensions from the result.
 static VectorValue projectVector(RewriterBase &rewriter, Location loc,
                                  VectorValue val, AffineMap projectionMap) {
-  SmallVector<int64_t> remaningDims;
+  SmallVector<int64_t> remainingDims;
   auto allDims =
       llvm::to_vector(llvm::seq<int64_t>(projectionMap.getNumDims()));
   llvm::SmallDenseSet<int64_t> slicedDims(allDims.begin(), allDims.end());
   for (int64_t resultIdx : llvm::seq<int64_t>(projectionMap.getNumResults())) {
     int64_t iterSpacePos = projectionMap.getDimPosition(resultIdx);
-    remaningDims.push_back(iterSpacePos);
+    remainingDims.push_back(iterSpacePos);
     slicedDims.erase(iterSpacePos);
   }
 
   auto transposePerm = llvm::to_vector_of<int64_t>(slicedDims);
-  transposePerm.append(remaningDims);
+  transposePerm.append(remainingDims);
   auto transposed =
       vector::TransposeOp::create(rewriter, loc, val, transposePerm);
 
@@ -674,15 +674,15 @@ struct DistributeTransferGather final
     // leaving the original base offset unchanged for gathered dimensions.
     AffineMap permMap = gatherOp.getPermutationMap();
 
-    SmallVector<SmallVector<int64_t>> allMaskOffsets;
-    std::vector<StaticTileOffsetRange::IteratorTy> allIndexVecOffsets;
+    std::vector<StaticTileOffsetRange::IteratorTy> allMaskOffsets;
     if (mask) {
       SmallVector<int64_t> maskDistShape = maskLayout.getDistributedShape();
       SmallVector<int64_t> maskTileShape =
           getElementVectorTileShape(maskLayout);
-      allMaskOffsets =
-          llvm::to_vector(StaticTileOffsetRange(maskDistShape, maskTileShape));
+      allMaskOffsets.push_back(
+          StaticTileOffsetRange(maskDistShape, maskTileShape).begin());
     }
+    std::vector<StaticTileOffsetRange::IteratorTy> allIndexVecOffsets;
     for (NestedLayoutAttr layout : indexVecLayouts) {
       SmallVector<int64_t> vecDistShape = layout.getDistributedShape();
       SmallVector<int64_t> vecTileShape = getElementVectorTileShape(layout);
@@ -710,10 +710,9 @@ struct DistributeTransferGather final
 
       VectorValue slicedMask = nullptr;
       if (mask) {
-        SmallVector<int64_t> maskDistShape = maskLayout.getDistributedShape();
-        SmallVector<int64_t> maskTileShape =
-            getElementVectorTileShape(maskLayout);
-        SmallVector<int64_t> maskOffsets = allMaskOffsets[idx];
+        SmallVector<int64_t> maskOffsets =
+            llvm::to_vector(*(allMaskOffsets[0]));
+        ++allMaskOffsets[0];
         slicedMask = getSlicedPermutedValue(rewriter, gatherOp.getLoc(),
                                             maskOffsets, maskLayout, mask);
       }
@@ -742,33 +741,32 @@ struct DistributeTransferGather final
   int64_t subgroupSize;
 };
 
-/// Pattern to distribute `iree_linalg_ext.map_scatter` ops with nested layouts.
+/// Pattern to distribute `iree_linalg_ext.map_store` ops with nested layouts.
 /// Only the input is distributed, since the output is never a vector. The
 /// distribution of the input is similar to that of a vector.transfer_write.
-struct DistributeMapScatter final
-    : OpDistributionPattern<IREE::LinalgExt::MapScatterOp> {
+struct DistributeMapStore final
+    : OpDistributionPattern<IREE::LinalgExt::MapStoreOp> {
   using OpDistributionPattern::OpDistributionPattern;
 
-  DistributeMapScatter(MLIRContext *context, Value threadId,
-                       int64_t subgroupSize)
+  DistributeMapStore(MLIRContext *context, Value threadId, int64_t subgroupSize)
       : OpDistributionPattern(context), threadId(threadId),
         subgroupSize(subgroupSize) {}
 
-  LogicalResult matchAndRewrite(IREE::LinalgExt::MapScatterOp mapScatterOp,
+  LogicalResult matchAndRewrite(IREE::LinalgExt::MapStoreOp mapStoreOp,
                                 DistributionSignature &signature,
                                 PatternRewriter &rewriter) const override {
-    auto input = dyn_cast<VectorValue>(mapScatterOp.getInput());
+    auto input = dyn_cast<VectorValue>(mapStoreOp.getInput());
     if (!input) {
-      return rewriter.notifyMatchFailure(mapScatterOp, "input is not a vector");
+      return rewriter.notifyMatchFailure(mapStoreOp, "input is not a vector");
     }
     NestedLayoutAttr vectorLayout =
         dyn_cast<NestedLayoutAttr>(signature[input]);
     if (!vectorLayout) {
-      return rewriter.notifyMatchFailure(mapScatterOp,
-                                         "non-nested map_scatter layout");
+      return rewriter.notifyMatchFailure(mapStoreOp,
+                                         "non-nested map_store layout");
     }
-    if (!isa<MemRefType>(mapScatterOp.getOutput().getType())) {
-      return rewriter.notifyMatchFailure(mapScatterOp,
+    if (!isa<MemRefType>(mapStoreOp.getOutput().getType())) {
+      return rewriter.notifyMatchFailure(mapStoreOp,
                                          "distribution expects memrefs");
     }
     SmallVector<Value> warpIndices, threadIndices;
@@ -776,12 +774,12 @@ struct DistributeMapScatter final
                                             vectorLayout, warpIndices,
                                             threadIndices))) {
       return rewriter.notifyMatchFailure(
-          mapScatterOp, "warp or thread tiles have overlapping strides");
+          mapStoreOp, "warp or thread tiles have overlapping strides");
     }
 
     Value distributedVector = getDistributed(rewriter, input, vectorLayout);
 
-    Location loc = mapScatterOp.getLoc();
+    Location loc = mapStoreOp.getLoc();
     Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
     SmallVector<int64_t> distShape = vectorLayout.getDistributedShape();
     SmallVector<int64_t> tileShape = getElementVectorTileShape(vectorLayout);
@@ -795,7 +793,7 @@ struct DistributeMapScatter final
           rewriter, loc, distributedVector,
           offsetArray.take_front(vectorLayout.getRank() * 2));
 
-      // Clone the map_scatter op with the "element vector" as the input, and
+      // Clone the map_store op with the "element vector" as the input, and
       // adjust the transformation region to account for the distributed
       // offsets.
       AffineMap permutationMap =
@@ -805,17 +803,17 @@ struct DistributeMapScatter final
           getTransferIndicesFromNestedLayout(rewriter, indices, offsets,
                                              vectorLayout, permutationMap,
                                              warpIndices, threadIndices);
-      IREE::LinalgExt::MapScatterOp distributedMapScatter =
-          clone(rewriter, mapScatterOp, mapScatterOp.getResultTypes(),
-                {distributedInput, mapScatterOp.getOutput()});
+      IREE::LinalgExt::MapStoreOp distributedMapStore =
+          clone(rewriter, mapStoreOp, mapStoreOp.getResultTypes(),
+                {distributedInput, mapStoreOp.getOutput()});
       int64_t sliceRank = distributedInput.getType().getRank();
       int64_t rankDiff = input.getType().getRank() - sliceRank;
-      // Add the distributed offsets in the map_scatter transformation body.
+      // Add the distributed offsets in the map_store transformation body.
       auto transformationBuilder = [&](ArrayRef<BlockArgument> newIndices) {
         SmallVector<Value> replacementIndices(distributedOffsets);
         for (auto [i, replacementIdx] : llvm::enumerate(replacementIndices)) {
           // Rank-reduced dimensions can be directly replaced by the distributed
-          // index, since their size is 1 in the new map_scatter input.
+          // index, since their size is 1 in the new map_store input.
           if (i < rankDiff) {
             continue;
           }
@@ -828,11 +826,11 @@ struct DistributeMapScatter final
         }
         return replacementIndices;
       };
-      distributedMapScatter.insertTransformationAtStart(
+      distributedMapStore.insertTransformationAtStart(
           rewriter, transformationBuilder, sliceRank);
     }
 
-    rewriter.eraseOp(mapScatterOp);
+    rewriter.eraseOp(mapStoreOp);
     return success();
   }
 
@@ -1034,7 +1032,7 @@ struct DistributeMultiReduction final
     // TODO: As per current upstream lowering implementations, there is no point
     // in doing this because it does a select much later in a finer granularity
     // rather than supporting predication. Moreover, since we are doing a select
-    // to cater reductions accross the distribution, we can choose not to mask
+    // to cater reductions across the distribution, we can choose not to mask
     // the op post-distribution.
 
     VectorValue locallyReduced;
@@ -1498,7 +1496,7 @@ struct DistributeContract final
     // TODO: As per current upstream lowering implementations, there is no point
     // in doing this because it does a select much later in a finer granularity
     // rather than supporting predication. Moreover, since we are doing a select
-    // to cater reductions accross the distribution, we can choose not to mask
+    // to cater reductions across the distribution, we can choose not to mask
     // the op post-distribution.
 
     VectorValue localContractValue;
@@ -1699,21 +1697,9 @@ struct DistributeBatchOuterToLayoutConversions final
       return rewriter.notifyMatchFailure(toLayoutOp, "non-nested layout");
     }
 
-    // Check if everything other than batch and outer tile matches.
-    if (layoutA.getSubgroupTile() != layoutB.getSubgroupTile()) {
-      return failure();
-    }
-    if (layoutA.getSubgroupStrides() != layoutB.getSubgroupStrides()) {
-      return failure();
-    }
-    if (layoutA.getThreadTile() != layoutB.getThreadTile()) {
-      return failure();
-    }
-    if (layoutA.getThreadStrides() != layoutB.getThreadStrides()) {
-      return failure();
-    }
-    if (layoutA.getElementTile() != layoutB.getElementTile()) {
-      return failure();
+    if (layoutA.needsSharedMemoryForConversion(layoutB)) {
+      return rewriter.notifyMatchFailure(toLayoutOp,
+                                         "conversion requires shared memory");
     }
 
     auto batchTileA = SmallVector<int64_t>(layoutA.getBatchTile());
@@ -2222,12 +2208,12 @@ struct DistributeInnerTiled final
 
 } // namespace
 
-void populateGPUDistributeNestedLayoutAttrPatterns(
+void IREE::VectorExt::populateNestedLayoutDistributionPatterns(
     RewritePatternSet &patterns, Value threadId, int64_t subgroupSize,
     ArrayRef<int64_t> workgroupSize, int64_t maxBitsPerShuffle) {
   patterns.add<DistributeTransferRead, DistributeTransferGather,
-               DistributeMapScatter>(patterns.getContext(), threadId,
-                                     subgroupSize);
+               DistributeMapStore>(patterns.getContext(), threadId,
+                                   subgroupSize);
   patterns.add<DistributeTransferWrite>(patterns.getContext(), threadId,
                                         subgroupSize, workgroupSize);
   patterns.add<DistributeBroadcast, DistributeTranspose, DistributeShapeCast>(
@@ -2242,4 +2228,4 @@ void populateGPUDistributeNestedLayoutAttrPatterns(
       patterns.getContext(), threadId, subgroupSize);
 }
 
-}; // namespace mlir::iree_compiler
+} // namespace mlir::iree_compiler

@@ -128,6 +128,7 @@ iree_cc_library(
     "MaterializeEncodingIntoNop.cpp"
     "MaterializeEncodingPatterns.cpp"
     "MaterializeTuningSpecsPass.cpp"
+    "MaterializeVectorMasking.cpp"
     "MathTransformPass.cpp"
     "MemrefCopyToLinalg.cpp"
     "NormalizeLoopBounds.cpp"
@@ -244,6 +245,7 @@ iree_cc_library(
     iree::compiler::Codegen::Interfaces::BufferizationInterfaces
     iree::compiler::Codegen::Interfaces::PartitionableLoopsInterface
     iree::compiler::Codegen::Interfaces::UKernelOpInterface
+    iree::compiler::Codegen::Interfaces::VectorizableOpInterface
     iree::compiler::Codegen::Transforms
     iree::compiler::Codegen::Utils
     iree::compiler::Dialect::Encoding::IR

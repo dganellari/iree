@@ -206,9 +206,9 @@ LogicalResult setConvOpConfig(linalg::LinalgOp linalgOp,
     assert(convDims.outputChannel.size() == 1);
     ocIndex = convDims.outputChannel.front();
   } else if (!convDims.depth.empty()) {
-    // For depthwise convolution ops with multipler 1, we have the same
+    // For depthwise convolution ops with multiplier 1, we have the same
     // input/filter/output channel size, which is being categorized as the
-    // multipler.
+    // multiplier.
     assert(convDims.depth.size() == 1);
     ocIndex = convDims.depth.front();
   } else {
@@ -273,7 +273,7 @@ LogicalResult setConvOpConfig(linalg::LinalgOp linalgOp,
       return failure();
     }
 
-    // Deduce the configruation for the OW and OH dimension. Try to make them
+    // Deduce the configuration for the OW and OH dimension. Try to make them
     // even if possible given we typically have images with the same height
     // and width.
     const bool tileToSquare = tileConvSquare(
@@ -1437,20 +1437,20 @@ static LogicalResult setReductionConfig(IREE::GPU::TargetAttr target,
   std::array<int64_t, 3> workgroupSize = {groupSize, 1, 1};
 
   SmallVector<int64_t> reductionTileSizes(op.getNumLoops(), 0);
-  int64_t remaingGroupSize = groupSize;
+  int64_t remainingGroupSize = groupSize;
   for (int i = reductionDims.size() - 1; i >= 0; --i) {
     int64_t dim = reductionDims[i];
     int64_t bound = bounds[dim];
     if (i == reductionDims.size() - 1) {
       bound /= vectorSize;
     }
-    APInt size = GreatestCommonDivisor(APInt(64, uint64_t(remaingGroupSize)),
+    APInt size = GreatestCommonDivisor(APInt(64, uint64_t(remainingGroupSize)),
                                        APInt(64, uint64_t(bound)));
     reductionTileSizes[dim] = size.getSExtValue();
     if (i == reductionDims.size() - 1) {
       reductionTileSizes[dim] *= vectorSize;
     }
-    remaingGroupSize /= size.getSExtValue();
+    remainingGroupSize /= size.getSExtValue();
   }
 
   TileSizesListType tileSizes;
@@ -1562,7 +1562,7 @@ static LogicalResult setDefaultOpConfig(IREE::GPU::TargetAttr target,
   // Make sure we use a tile size that results in some integral number of bytes.
   const unsigned scaleToByte = minBitwidth < 8 ? 8 / minBitwidth : 1;
 
-  // Distribute workload to the given `numThreads` by allowing a potental loss.
+  // Distribute workload to the given `numThreads` by allowing a potential loss.
   auto distributeToThreads = [&](int64_t numThreads,
                                  std::optional<int64_t> lossFactor =
                                      std::nullopt) {
@@ -1590,7 +1590,7 @@ static LogicalResult setDefaultOpConfig(IREE::GPU::TargetAttr target,
         continue;
       }
 
-      // Try to find some power of two that can devide the current shape dim
+      // Try to find some power of two that can divide the current shape dim
       // size. This vector keeps the candidate tile sizes.
       SmallVector<int64_t, 8> candidates;
 
@@ -1687,7 +1687,7 @@ static LogicalResult setDefaultOpConfig(IREE::GPU::TargetAttr target,
   tileSizes.push_back(threadTileSizes);
 
   if (vectorizable) {
-    // Try to tile all reductions by some small factor, preferrably 4, when
+    // Try to tile all reductions by some small factor, preferably 4, when
     // possible. This gives us a chance to perform vector4 load if an input has
     // its innnermost dimension being reduction. It also avoids generating too
     // many instructions when unrolling vector later.
@@ -1756,8 +1756,8 @@ static LogicalResult setSPIRVOpConfig(IREE::GPU::TargetAttr target,
         auto type = cast<ShapedType>(op->getResult(0).getType());
         const int bitwidth = type.getElementTypeBitWidth();
         if (bitwidth <= 32) {
-          const int multipler = 32 / bitwidth;
-          const int bestTilingFactor = 32 * multipler;
+          const int multiplier = 32 / bitwidth;
+          const int bestTilingFactor = 32 * multiplier;
           const int subgroupSize = 32;
           auto result = detail::setConvOpConfig(cast<linalg::LinalgOp>(*op),
                                                 subgroupSize, bestTilingFactor);
@@ -1805,6 +1805,55 @@ static LogicalResult setSPIRVOpConfig(IREE::GPU::TargetAttr target,
 // Entry Point
 //===----------------------------------------------------------------------===//
 
+/// Find the root operation for the dispatch. The root is the op that will be
+/// tiled and distributed to workgroups; all other ops fuse with it as producers
+/// or consumers.
+///
+/// Priority (all passes iterate in reverse to prefer later ops):
+///   1. Named ops (matmul, conv) or generics with reduction iterators.
+///   2. Any generic op (elementwise).
+///   3. Fill ops.
+static Operation *getRootOperation(ArrayRef<Operation *> computeOps) {
+  Operation *rootOperation = nullptr;
+
+  // Pass 1: named ops or generics with reductions.
+  for (Operation *op : llvm::reverse(computeOps)) {
+    if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
+      if (genericOp.getNumLoops() != genericOp.getNumParallelLoops()) {
+        rootOperation = op;
+        break;
+      }
+      continue;
+    }
+    if (!isa<linalg::FillOp>(op) && isa<TilingInterface>(op)) {
+      rootOperation = op;
+      break;
+    }
+  }
+
+  // Pass 2: any generic op (elementwise).
+  if (!rootOperation) {
+    for (Operation *op : llvm::reverse(computeOps)) {
+      if (isa<linalg::GenericOp>(op)) {
+        rootOperation = op;
+        break;
+      }
+    }
+  }
+
+  // Pass 3: fill ops.
+  if (!rootOperation) {
+    for (Operation *op : llvm::reverse(computeOps)) {
+      if (isa<linalg::FillOp>(op)) {
+        rootOperation = op;
+        break;
+      }
+    }
+  }
+
+  return rootOperation;
+}
+
 static LogicalResult setConfigForKernel(IREE::GPU::TargetAttr target,
                                         mlir::FunctionOpInterface funcOp) {
   SmallVector<Operation *> computeOps = getComputeOps(funcOp);
@@ -1813,35 +1862,21 @@ static LogicalResult setConfigForKernel(IREE::GPU::TargetAttr target,
     return success();
   }
 
-  // Try to find a configuration according to a matmul/convolution op, which as
-  // at least one reduction dimension, and use it as the root op. So, skip all
-  // fused parallel producer ops.
-  ArrayRef roots(computeOps);
-  while (roots.size() > 1) {
-    auto linalgOp = dyn_cast<linalg::LinalgOp>(roots.front());
-    if (!linalgOp) {
-      break;
-    }
-    if (linalgOp.getNumParallelLoops() != linalgOp.getNumLoops()) {
-      break;
-    }
-    roots = roots.drop_front();
+  Operation *rootOp = getRootOperation(computeOps);
+  if (!rootOp) {
+    return computeOps.back()->emitOpError(
+        "unable to find root operation in dispatch");
   }
 
-  for (Operation *computeOp : roots) {
-    if (succeeded(setSPIRVOpConfig(target, funcOp, computeOp))) {
-      return success();
-    }
-  }
-
-  Operation *computeOp = roots.back();
-  // If there are still no root op, check for any linalg.generic op.
-  if (succeeded(setDefaultOpConfig(target, computeOp))) {
+  if (succeeded(setSPIRVOpConfig(target, funcOp, rootOp))) {
     return success();
   }
 
-  // Check if the op configuration was set.
-  return computeOp->emitOpError(
+  if (succeeded(setDefaultOpConfig(target, rootOp))) {
+    return success();
+  }
+
+  return rootOp->emitOpError(
       "without known roots, the last compute operation in the tiled "
       "loop body is expected to be set as root");
 }

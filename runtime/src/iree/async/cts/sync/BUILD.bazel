@@ -32,6 +32,20 @@ iree_runtime_cc_library(
     alwayslink = True,
 )
 
+# Shared notification tests: cross-process epoch, caller-provided primitives.
+# Uses eventfd (Linux), pipe (macOS), or Events (Windows) for wake/signal.
+iree_runtime_cc_library(
+    name = "shared_notification_test",
+    testonly = True,
+    srcs = ["shared_notification_test.cc"],
+    deps = [
+        "//runtime/src/iree/async",
+        "//runtime/src/iree/async/cts/util:registry",
+        "//runtime/src/iree/async/cts/util:test_base",
+    ],
+    alwayslink = True,
+)
+
 # Cancellation tests: timer/recv/accept/connect cancellation, guarantees.
 # Uses socket operations for recv/accept/connect cancel tests.
 iree_runtime_cc_library(
@@ -174,22 +188,34 @@ iree_runtime_cc_library(
 )
 
 #===------------------------------------------------------------------------===#
-# Convenience targets
+# Test groups
 #===------------------------------------------------------------------------===#
 
-# All sync tests (link with backend library and main.cc for test binary).
+# Notification, cancellation, and signal tests.
 iree_runtime_cc_library(
-    name = "all_tests",
+    name = "notification_tests",
     testonly = True,
     deps = [
         ":cancellation_test",
         ":notification_test",
-        ":relay_test",
-        ":semaphore_async_test",
-        ":semaphore_linked_test",
-        ":semaphore_sync_test",
         ":signal_test",
-    ] + select({
+    ],
+)
+
+# Shared notification tests (tag-gated: requires "shared_notification").
+iree_runtime_cc_library(
+    name = "shared_notification_tests",
+    testonly = True,
+    deps = [
+        ":shared_notification_test",
+    ],
+)
+
+# Platform-specific tests: fences, platform primitive relays.
+iree_runtime_cc_library(
+    name = "platform_tests",
+    testonly = True,
+    deps = select({
         "//build_tools/bazel:iree_is_windows": [
             ":relay_windows_test",
         ],
@@ -202,6 +228,26 @@ iree_runtime_cc_library(
             ":relay_posix_test",
         ],
     }),
+)
+
+# Relay tests: portable notification-to-notification relay dataflow.
+iree_runtime_cc_library(
+    name = "relay_tests",
+    testonly = True,
+    deps = [
+        ":relay_test",
+    ],
+)
+
+# Semaphore tests: timeline semantics, async operations, chained wait/signal.
+iree_runtime_cc_library(
+    name = "semaphore_tests",
+    testonly = True,
+    deps = [
+        ":semaphore_async_test",
+        ":semaphore_linked_test",
+        ":semaphore_sync_test",
+    ],
 )
 
 #===------------------------------------------------------------------------===#

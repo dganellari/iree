@@ -13,11 +13,13 @@
 #include "llvm/Support/DebugLog.h"
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/ValueBoundsOpInterface.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -29,8 +31,8 @@ namespace mlir::iree_compiler {
 #define GEN_PASS_DEF_COMBINESOURCELAYOUTTRANSFORMATIONPASS
 #include "iree/compiler/Codegen/Common/Passes.h.inc"
 
-using IREE::LinalgExt::MapGatherOp;
-using IREE::LinalgExt::MapScatterOp;
+using IREE::LinalgExt::MapLoadOp;
+using IREE::LinalgExt::MapStoreOp;
 
 //===----------------------------------------------------------------------===//
 // Preprocessing Utilities
@@ -81,50 +83,57 @@ static void simplifyComplexRelayoutOps(RewriterBase &rewriter,
 // Combining Layout Transformation Ops
 //===----------------------------------------------------------------------===//
 
-/// Folds an `op` that does not affect index computation into a `mapScatterOp`.
+/// Folds an `op` that does not affect index computation into a `mapStoreOp`.
 /// This is used for ops like `linalg::CopyOp`.
-static MapScatterOp
-foldIdentityLikeOpIntoMapScatter(RewriterBase &rewriter, Operation *op,
-                                 MapScatterOp mapScatterOp) {
-  assert(mapScatterOp.getInput() == op->getResult(0) &&
-         "expected op to be the producer of mapScatterOp");
-  rewriter.modifyOpInPlace(mapScatterOp, [&]() {
-    mapScatterOp.getInputMutable().assign(op->getOperand(0));
+static MapStoreOp foldIdentityLikeOpIntoMapStore(RewriterBase &rewriter,
+                                                 Operation *op,
+                                                 MapStoreOp mapStoreOp) {
+  assert(mapStoreOp.getInput() == op->getResult(0) &&
+         "expected op to be the producer of mapStoreOp");
+  rewriter.modifyOpInPlace(mapStoreOp, [&]() {
+    mapStoreOp.getInputMutable().assign(op->getOperand(0));
   });
-  return mapScatterOp;
+  return mapStoreOp;
 }
 
-/// Fold a `transposeOp` into a consumer `mapScatterOp`, by transposing the
-/// uses of the `mapScatterOp`s transformation_region block arguments.
-static MapScatterOp foldTransposeIntoMapScatter(RewriterBase &rewriter,
-                                                linalg::TransposeOp transposeOp,
-                                                MapScatterOp mapScatterOp) {
-  assert(mapScatterOp.getInput() == transposeOp->getResult(0) &&
-         "expected transposeOp to be the producer of mapScatterOp");
+/// Fold a `transposeOp` into a consumer `mapStoreOp`, by transposing the
+/// uses of the `mapStoreOp`s transformation_region block arguments.
+static MapStoreOp foldTransposeIntoMapStore(RewriterBase &rewriter,
+                                            linalg::TransposeOp transposeOp,
+                                            MapStoreOp mapStoreOp) {
+  assert(mapStoreOp.getInput() == transposeOp->getResult(0) &&
+         "expected transposeOp to be the producer of mapStoreOp");
 
   SmallVector<int64_t> perm(transposeOp.getPermutation());
-  rewriter.modifyOpInPlace(mapScatterOp, [&]() {
-    mapScatterOp.insertTransformationAtStart(
+  rewriter.modifyOpInPlace(mapStoreOp, [&]() {
+    mapStoreOp.insertTransformationAtStart(
         rewriter,
         [perm](ArrayRef<BlockArgument> indices) -> SmallVector<Value> {
           SmallVector<Value> indexValues(indices.begin(), indices.end());
           return applyPermutation(indexValues, perm);
         },
         perm.size());
-    mapScatterOp.getInputMutable().assign(transposeOp.getInput());
+    mapStoreOp.getInputMutable().assign(transposeOp.getInput());
   });
-  return mapScatterOp;
+  return mapStoreOp;
 }
 
 /// Fold a tensor::ExpandShapeOp or tensor::CollapseShapeOp into a consumer
-/// `mapScatterOp`, by linearizing and then delinearizing the source indices
-/// of the `mapScatterOp`s index transformation.
+/// `mapStoreOp`, by linearizing and then delinearizing the source indices
+/// of the `mapStoreOp`s index transformation.
 template <typename ReshapeOpTy>
-static IREE::LinalgExt::MapScatterOp
-foldReshapeIntoMapScatter(RewriterBase &rewriter, ReshapeOpTy reshapeOp,
-                          IREE::LinalgExt::MapScatterOp mapScatterOp) {
-  assert(mapScatterOp.getInput() == reshapeOp->getResult(0) &&
-         "expected reshapeOp to be the producer of mapScatterOp");
+static FailureOr<IREE::LinalgExt::MapStoreOp>
+foldReshapeIntoMapStore(RewriterBase &rewriter, ReshapeOpTy reshapeOp,
+                        IREE::LinalgExt::MapStoreOp mapStoreOp) {
+  assert(mapStoreOp.getInput() == reshapeOp->getResult(0) &&
+         "expected reshapeOp to be the producer of mapStoreOp");
+  // Cannot fold if either side of the reshape is rank-0 (scalar). The source
+  // being rank-0 would make the new map_store input rank-0, and the result
+  // being rank-0 would produce an empty delinearization.
+  if (cast<RankedTensorType>(reshapeOp.getSrc().getType()).getRank() == 0 ||
+      cast<RankedTensorType>(reshapeOp.getResult().getType()).getRank() == 0) {
+    return failure();
+  }
   Location loc = reshapeOp->getLoc();
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPointAfter(reshapeOp);
@@ -136,47 +145,47 @@ foldReshapeIntoMapScatter(RewriterBase &rewriter, ReshapeOpTy reshapeOp,
   SmallVector<OpFoldResult> resultDims =
       tensor::getMixedSizes(rewriter, loc, reshapeOp.getResult());
 
-  Location mapScatterLoc = mapScatterOp->getLoc();
-  rewriter.modifyOpInPlace(mapScatterOp, [&]() {
-    mapScatterOp.insertTransformationAtStart(
+  Location mapStoreLoc = mapStoreOp->getLoc();
+  rewriter.modifyOpInPlace(mapStoreOp, [&]() {
+    mapStoreOp.insertTransformationAtStart(
         rewriter,
-        [&rewriter, mapScatterLoc, srcDims,
+        [&rewriter, mapStoreLoc, srcDims,
          resultDims](ArrayRef<BlockArgument> indices) -> SmallVector<Value> {
           SmallVector<Value> indexValues(indices.begin(), indices.end());
           auto linearizeIndexOp = affine::AffineLinearizeIndexOp::create(
-              rewriter, mapScatterLoc, indexValues, srcDims, /*disjoint=*/true);
+              rewriter, mapStoreLoc, indexValues, srcDims, /*disjoint=*/true);
           auto delinearizeIndexOp = affine::AffineDelinearizeIndexOp::create(
-              rewriter, mapScatterLoc, linearizeIndexOp.getResult(), resultDims,
+              rewriter, mapStoreLoc, linearizeIndexOp.getResult(), resultDims,
               /*hasOuterBound=*/true);
           return delinearizeIndexOp->getResults();
         },
         srcDims.size());
-    mapScatterOp.getInputMutable().assign(reshapeOp->getOperand(0));
+    mapStoreOp.getInputMutable().assign(reshapeOp->getOperand(0));
   });
-  return mapScatterOp;
+  return mapStoreOp;
 }
 
-/// Fold a tensor::ExpandShapeOp into a consumer `mapScatterOp`, by linearizing
-/// and then delinearizing the source indices of the `mapScatterOp`s index
+/// Fold a tensor::ExpandShapeOp into a consumer `mapStoreOp`, by linearizing
+/// and then delinearizing the source indices of the `mapStoreOp`s index
 /// transformation.
-static MapScatterOp
-foldExpandShapeIntoMapScatter(RewriterBase &rewriter,
-                              tensor::ExpandShapeOp expandShapeOp,
-                              MapScatterOp mapScatterOp) {
-  return foldReshapeIntoMapScatter(rewriter, expandShapeOp, mapScatterOp);
+static FailureOr<MapStoreOp>
+foldExpandShapeIntoMapStore(RewriterBase &rewriter,
+                            tensor::ExpandShapeOp expandShapeOp,
+                            MapStoreOp mapStoreOp) {
+  return foldReshapeIntoMapStore(rewriter, expandShapeOp, mapStoreOp);
 }
 
-/// Fold a tensor::CollapseShapeOp into a consumer `mapScatterOp`, by
+/// Fold a tensor::CollapseShapeOp into a consumer `mapStoreOp`, by
 /// linearizing and then delinearizing the source indices of the
-/// `mapScatterOp`s index transformation.
-static MapScatterOp
-foldCollapseShapeIntoMapScatter(RewriterBase &rewriter,
-                                tensor::CollapseShapeOp collapseShapeOp,
-                                MapScatterOp mapScatterOp) {
-  return foldReshapeIntoMapScatter(rewriter, collapseShapeOp, mapScatterOp);
+/// `mapStoreOp`s index transformation.
+static FailureOr<MapStoreOp>
+foldCollapseShapeIntoMapStore(RewriterBase &rewriter,
+                              tensor::CollapseShapeOp collapseShapeOp,
+                              MapStoreOp mapStoreOp) {
+  return foldReshapeIntoMapStore(rewriter, collapseShapeOp, mapStoreOp);
 }
 
-/// Fold an `extractSliceOp` into a consumer `mapScatterOp`. If the
+/// Fold an `extractSliceOp` into a consumer `mapStoreOp`. If the
 /// extract_slice is an identity operation, the input is replaced directly.
 /// Otherwise, a mask is applied based on the bounds of the extractSliceOp.
 /// Currently, only zero offsets and unit strides are supported.
@@ -191,12 +200,12 @@ foldCollapseShapeIntoMapScatter(RewriterBase &rewriter,
 ///   ...
 ///   %boundN = arith.cmpi ult, %idxN, %sizeN : index
 ///   %new_mask = arith.andi %maskN-1, %boundN : i1
-static FailureOr<MapScatterOp>
-foldExtractSliceIntoMapScatter(RewriterBase &rewriter,
-                               tensor::ExtractSliceOp extractSliceOp,
-                               MapScatterOp mapScatterOp) {
-  assert(mapScatterOp.getInput() == extractSliceOp->getResult(0) &&
-         "expected extractSliceOp to be the producer of mapScatterOp");
+static FailureOr<MapStoreOp>
+foldExtractSliceIntoMapStore(RewriterBase &rewriter,
+                             tensor::ExtractSliceOp extractSliceOp,
+                             MapStoreOp mapStoreOp) {
+  assert(mapStoreOp.getInput() == extractSliceOp->getResult(0) &&
+         "expected extractSliceOp to be the producer of mapStoreOp");
   // TODO(Max191): Support rank-reducing slices.
   if (extractSliceOp.getSourceType().getRank() !=
       extractSliceOp.getResultType().getRank()) {
@@ -232,18 +241,18 @@ foldExtractSliceIntoMapScatter(RewriterBase &rewriter,
   if (isIdentity) {
     // Identity extract_slice: just replace the input without any masking.
     rewriter.modifyOpInPlace(
-        mapScatterOp, [&]() { mapScatterOp.getInputMutable().assign(source); });
-    return mapScatterOp;
+        mapStoreOp, [&]() { mapStoreOp.getInputMutable().assign(source); });
+    return mapStoreOp;
   }
 
   SmallVector<OpFoldResult> bounds(extractSliceOp.getMixedSizes());
-  Block &transformBody = mapScatterOp.getTransformationRegion().front();
+  Block &transformBody = mapStoreOp.getTransformationRegion().front();
   auto yieldOp = cast<IREE::LinalgExt::YieldOp>(transformBody.getTerminator());
   Value mask = yieldOp->getOperands().back();
 
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(yieldOp);
-  Location loc = mapScatterOp->getLoc();
+  Location loc = mapStoreOp->getLoc();
   ArrayRef<BlockArgument> srcIndices = transformBody.getArguments();
   for (auto [bound, srcIdx] : llvm::zip_equal(bounds, srcIndices)) {
     Value boundValue = getValueOrCreateConstantIndexOp(rewriter, loc, bound);
@@ -256,10 +265,10 @@ foldExtractSliceIntoMapScatter(RewriterBase &rewriter,
   rewriter.modifyOpInPlace(yieldOp, [&]() {
     yieldOp->setOperand(yieldOp->getNumOperands() - 1, mask);
   });
-  rewriter.modifyOpInPlace(mapScatterOp, [&]() {
-    mapScatterOp.getInputMutable().assign(extractSliceOp.getSource());
+  rewriter.modifyOpInPlace(mapStoreOp, [&]() {
+    mapStoreOp.getInputMutable().assign(extractSliceOp.getSource());
   });
-  return mapScatterOp;
+  return mapStoreOp;
 }
 
 static void buildNestedDistributionLoops(
@@ -306,21 +315,20 @@ static void buildNestedDistributionLoops(
       });
 }
 
-FailureOr<MapScatterOp>
-foldPadIntoMapScatter(RewriterBase &rewriter, tensor::PadOp padOp,
-                      MapScatterOp mapScatterOp,
-                      PadDistributionConfigFn padDistributionConfigFn) {
-  // Find the output buffer that the mapScatterOp is stored into.
-  if (!mapScatterOp->hasOneUse()) {
-    return rewriter.notifyMatchFailure(
-        mapScatterOp, "map_scatter does not have a single user");
+FailureOr<MapStoreOp>
+foldPadIntoMapStore(RewriterBase &rewriter, tensor::PadOp padOp,
+                    MapStoreOp mapStoreOp,
+                    PadDistributionConfigFn padDistributionConfigFn) {
+  // Find the output buffer that the mapStoreOp is stored into.
+  if (!mapStoreOp->hasOneUse()) {
+    return rewriter.notifyMatchFailure(mapStoreOp,
+                                       "map_store does not have a single user");
   }
-  auto storeOp = dyn_cast<IREE::Codegen::StoreToBufferOp>(
-      *mapScatterOp->getUsers().begin());
+  auto storeOp =
+      dyn_cast<IREE::Codegen::StoreToBufferOp>(*mapStoreOp->getUsers().begin());
   if (!storeOp) {
     return rewriter.notifyMatchFailure(
-        mapScatterOp,
-        "map_scatter user is not an iree_codegen.store_to_buffer op");
+        mapStoreOp, "map_store user is not an iree_codegen.store_to_buffer op");
   }
 
   rewriter.setInsertionPointAfter(storeOp);
@@ -334,10 +342,10 @@ foldPadIntoMapScatter(RewriterBase &rewriter, tensor::PadOp padOp,
   Value outputBuffer = storeOp.getBuffer();
   auto innerLoopBuilder = [&](OpBuilder &b, Location loopLoc, ValueRange ivs) {
     // We need to scatter the padding values according to the existing
-    // mapScatterOp transformation, so clone the transformation into the
+    // mapStoreOp transformation, so clone the transformation into the
     // loop nest.
     IRMapping mapping;
-    Region &transformRegion = mapScatterOp.getTransformationRegion();
+    Region &transformRegion = mapStoreOp.getTransformationRegion();
     Block *loopBody = rewriter.getInsertionBlock();
     transformRegion.cloneInto(loopBody->getParent(), mapping);
     Block *clonedTransformBody =
@@ -481,39 +489,37 @@ foldPadIntoMapScatter(RewriterBase &rewriter, tensor::PadOp padOp,
   // Now that the padding values are being written to the outputBuffer, the
   // padOp becomes a no-op with respect to the index transformation on the
   // non-padded values.
-  rewriter.modifyOpInPlace(mapScatterOp, [&]() {
-    mapScatterOp.getInputMutable().assign(padOp.getSource());
+  rewriter.modifyOpInPlace(mapStoreOp, [&]() {
+    mapStoreOp.getInputMutable().assign(padOp.getSource());
   });
-  return mapScatterOp;
+  return mapStoreOp;
 }
 
-FailureOr<MapScatterOp> foldIntoMapScatter(RewriterBase &rewriter,
-                                           Operation *op,
-                                           MapScatterOp mapScatterOp) {
-  return llvm::TypeSwitch<Operation *, FailureOr<MapScatterOp>>(op)
+FailureOr<MapStoreOp> foldIntoMapStore(RewriterBase &rewriter, Operation *op,
+                                       MapStoreOp mapStoreOp) {
+  return llvm::TypeSwitch<Operation *, FailureOr<MapStoreOp>>(op)
       .Case([&](linalg::CopyOp copyOp) {
-        return foldIdentityLikeOpIntoMapScatter(rewriter, copyOp, mapScatterOp);
+        return foldIdentityLikeOpIntoMapStore(rewriter, copyOp, mapStoreOp);
       })
       .Case([&](linalg::TransposeOp transposeOp) {
-        return foldTransposeIntoMapScatter(rewriter, transposeOp, mapScatterOp);
+        return foldTransposeIntoMapStore(rewriter, transposeOp, mapStoreOp);
       })
       .Case([&](tensor::ExpandShapeOp expandOp) {
-        return foldExpandShapeIntoMapScatter(rewriter, expandOp, mapScatterOp);
+        return foldExpandShapeIntoMapStore(rewriter, expandOp, mapStoreOp);
       })
       .Case([&](tensor::CollapseShapeOp collapseOp) {
-        return foldCollapseShapeIntoMapScatter(rewriter, collapseOp,
-                                               mapScatterOp);
+        return foldCollapseShapeIntoMapStore(rewriter, collapseOp, mapStoreOp);
       })
       .Case([&](tensor::ExtractSliceOp extractSliceOp) {
-        return foldExtractSliceIntoMapScatter(rewriter, extractSliceOp,
-                                              mapScatterOp);
+        return foldExtractSliceIntoMapStore(rewriter, extractSliceOp,
+                                            mapStoreOp);
       })
       .Default(failure());
 }
 
-// Insert identity map_scatter op after the root and replace all uses.
-static MapScatterOp insertIdentityMapScatter(RewriterBase &rewriter,
-                                             OpResult root) {
+// Insert identity map_store op after the root and replace all uses.
+static MapStoreOp insertIdentityMapStore(RewriterBase &rewriter,
+                                         OpResult root) {
   Location loc = root.getLoc();
   SetVector<OpOperand *> originalUses;
   for (OpOperand &use : root.getUses()) {
@@ -523,21 +529,115 @@ static MapScatterOp insertIdentityMapScatter(RewriterBase &rewriter,
   rewriter.setInsertionPointAfterValue(root);
   Type elementType = cast<RankedTensorType>(root.getType()).getElementType();
   SmallVector<OpFoldResult> sizes = tensor::getMixedSizes(rewriter, loc, root);
-  Value mapScatterDest =
+  Value mapStoreDest =
       tensor::EmptyOp::create(rewriter, loc, sizes, elementType);
-  auto mapScatterOp = MapScatterOp::createIdentityMapScatter(
-      rewriter, loc, root, mapScatterDest);
+  auto mapStoreOp =
+      MapStoreOp::createIdentityMapStore(rewriter, loc, root, mapStoreDest);
   rewriter.replaceUsesWithIf(
-      root, mapScatterOp.getResult(0),
+      root, mapStoreOp.getResult(0),
       [&](OpOperand &use) { return originalUses.contains(&use); });
-  LDBG() << "Created identity map_scatter:\n" << mapScatterOp;
-  return mapScatterOp;
+  LDBG() << "Created identity map_store:\n" << mapStoreOp;
+  return mapStoreOp;
 }
 
-bool isSupportedSingleInputRelayoutOp(Operation *op) {
+bool isSupportedSingleInputRelayoutOpForResult(Operation *op) {
   return isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp,
              tensor::ExtractSliceOp, tensor::PadOp, linalg::CopyOp,
              linalg::TransposeOp>(op);
+}
+
+bool isSupportedSingleInputRelayoutOpForSource(Operation *op) {
+  if (isSupportedSingleInputRelayoutOpForResult(op)) {
+    return true;
+  }
+  auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+  return linalgOp && linalg::isaBroadcastOpInterface(linalgOp).has_value();
+}
+
+/// Returns true if `user` is a supported relayout op that uses `result` as a
+/// valid source for extending the relayout chain.
+///
+/// We use different logic for DPS vs non-DPS ops so neither case needs to
+/// consider operand numbers:
+/// - DPS ops (e.g. linalg broadcast): Iterate getDpsInputOperands(). Only
+///   consider uses as an *input* operand.
+/// - Non-DPS ops (expand_shape, collapse_shape, transpose, etc.): Caller
+///   iterates result.getUsers(), so we know user consumes result. These ops
+///   have a single input.
+static bool isRelayoutChainExtension(Operation *user, Value result) {
+  if (!isSupportedSingleInputRelayoutOpForSource(user)) {
+    return false;
+  }
+  auto dpsOp = dyn_cast<DestinationStyleOpInterface>(user);
+  if (dpsOp) {
+    for (OpOperand *input : dpsOp.getDpsInputOperands()) {
+      if (input->get() == result) {
+        return true;
+      }
+    }
+    return false;
+  }
+  // Non-DPS: caller iterates result.getUsers(), so user consumes result.
+  // Single-input relayout ops have only one place for it.
+  return true;
+}
+
+/// Collects all relayout ops in the chain starting from `relayoutOp`
+/// (inclusive). The chain extends through result->user edges where the user is
+/// a supported relayout op.
+static void collectRelayoutChain(Operation *relayoutOp,
+                                 SmallPtrSetImpl<Operation *> &chain) {
+  if (!chain.insert(relayoutOp).second) {
+    return;
+  }
+  Value result = relayoutOp->getResult(0);
+  for (Operation *user : result.getUsers()) {
+    if (isRelayoutChainExtension(user, result)) {
+      collectRelayoutChain(user, chain);
+    }
+  }
+}
+
+/// Returns true if the relayout op starts a "complex" chain.
+/// A "complex" chain is one that is difficult for bufferization to handle. The
+/// conditions are:
+/// - The chain length must be >= 2.
+/// - The chain must contain at least one reshape op (expand_shape or
+/// collapse_shape).
+/// - The chain must contain at least one op that is not extract_slice or a
+/// reshape op.
+static bool isComplexRelayoutChain(Operation *relayoutOp) {
+  assert(isSupportedSingleInputRelayoutOpForSource(relayoutOp) &&
+         "expected a supported relayout op");
+  SmallPtrSet<Operation *, 4> chain;
+  collectRelayoutChain(relayoutOp, chain);
+  if (chain.size() < 2) {
+    return false;
+  }
+  bool hasReshape = llvm::any_of(
+      chain, llvm::IsaPred<tensor::ExpandShapeOp, tensor::CollapseShapeOp>);
+  // Need at least one op that is not reshape and not extract_slice (e.g. copy,
+  // transpose, broadcast, pad).
+  bool allReshapeOrExtractSlice = llvm::all_of(
+      chain, llvm::IsaPred<tensor::ExpandShapeOp, tensor::CollapseShapeOp,
+                           tensor::ExtractSliceOp>);
+  return hasReshape && !allReshapeOrExtractSlice;
+}
+
+/// Collects direct relayout op users of `loadResult` that start complex
+/// relayout chains. When `combineNonComplexChains` is true it includes all
+/// relayout op users regardless of complexity.
+static SmallPtrSet<Operation *, 4>
+getComplexChainRelayoutUsers(Value loadResult,
+                             bool combineNonComplexChains = false) {
+  SmallPtrSet<Operation *, 4> complexUsers;
+  for (Operation *user : loadResult.getUsers()) {
+    if (isRelayoutChainExtension(user, loadResult) &&
+        (combineNonComplexChains || isComplexRelayoutChain(user))) {
+      complexUsers.insert(user);
+    }
+  }
+  return complexUsers;
 }
 
 // This is only desirable in the dispatch scope but not in the workgroup scope.
@@ -549,28 +649,29 @@ shouldDoReshapesByExpansion(IREE::Codegen::RelayoutCombinationScope scope) {
   return false;
 }
 
-/// Insert identity map_scatter ops after the given operation if it is a valid
+/// Insert identity map_store ops after the given operation if it is a valid
 /// leaf op of a relayout op chain. A relayout op chain is a sequence of
-/// relayout ops (defined by `isSupportedSingleInputRelayoutOp`) for which the
-/// only users of the ops in the chain are relayout ops, except for the leaves
-/// of the chain. The leaves are simply relayout ops that have non relayout op
-/// users. The `controlFn` is a callback on the leaf OpResult that provides
-/// control over whether or not to insert a map_scatter op.
-struct InsertMapScatterOpPattern : public RewritePattern {
-  InsertMapScatterOpPattern(MLIRContext *context,
-                            CombineRelayoutOpsControlFnRef controlFn = nullptr,
-                            PatternBenefit benefit = 1)
+/// relayout ops (defined by `isSupportedSingleInputRelayoutOpForResult`) for
+/// which the only users of the ops in the chain are relayout ops, except for
+/// the leaves of the chain. The leaves are simply relayout ops that have non
+/// relayout op users. The `controlFn` is a callback on the leaf OpResult that
+/// provides control over whether or not to insert a map_store op.
+struct InsertMapStoreOpPattern : public RewritePattern {
+  InsertMapStoreOpPattern(MLIRContext *context,
+                          CombineRelayoutOpsControlFnRef controlFn = nullptr,
+                          PatternBenefit benefit = 1)
       : RewritePattern(MatchAnyOpTypeTag(), benefit, context),
         controlFn(controlFn) {}
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
-    if (!isSupportedSingleInputRelayoutOp(op)) {
+    if (!isSupportedSingleInputRelayoutOpForResult(op)) {
       return failure();
     }
     // Relayout ops with only relayout op users are not leaves.
     auto isDimOrSupportedRelayoutOp = [](Operation *op) {
-      return isSupportedSingleInputRelayoutOp(op) || isa<tensor::DimOp>(op);
+      return isSupportedSingleInputRelayoutOpForResult(op) ||
+             isa<tensor::DimOp>(op);
     };
     if (llvm::all_of(op->getUsers(), isDimOrSupportedRelayoutOp)) {
       return failure();
@@ -580,7 +681,7 @@ struct InsertMapScatterOpPattern : public RewritePattern {
     if (controlFn && !controlFn(leaf)) {
       return failure();
     }
-    (void)insertIdentityMapScatter(rewriter, leaf);
+    (void)insertIdentityMapStore(rewriter, leaf);
     return success();
   }
 
@@ -641,7 +742,7 @@ combineLayoutTransformation(MLIRContext *ctx, FunctionOpInterface funcOp,
   linalg::populateDataLayoutPropagationPatterns(
       propagationPatterns, controlPropagationFn, /*PoisonPaddingOk=*/true);
   // TODO(Max191): The propagation patterns could be applied at the same time as
-  // relayout ops are folded into the map_scatter, which may enable even more
+  // relayout ops are folded into the map_store, which may enable even more
   // folding. This requires the relayout op folding to be done as pattern
   // rewrites, and also direct foldings for pack and unpack ops.
   if (failed(applyPatternsGreedily(funcOp, std::move(propagationPatterns)))) {
@@ -666,9 +767,9 @@ combineLayoutTransformation(MLIRContext *ctx, FunctionOpInterface funcOp,
     }
   }
 
-  // Combine relayout operations into new the map_scatter ops.
+  // Combine relayout operations into new the map_store ops.
   RewritePatternSet relayoutCombinationPatterns(ctx);
-  relayoutCombinationPatterns.add<InsertMapScatterOpPattern>(ctx, controlFn);
+  relayoutCombinationPatterns.add<InsertMapStoreOpPattern>(ctx, controlFn);
   populateCombineRelayoutOpPatterns(relayoutCombinationPatterns,
                                     padDistributionConfigFn);
   memref::populateResolveRankedShapedTypeResultDimsPatterns(
@@ -678,10 +779,10 @@ combineLayoutTransformation(MLIRContext *ctx, FunctionOpInterface funcOp,
     return failure();
   }
 
-  // Clean up any identity map_scatter ops after combining.
-  funcOp->walk([&](MapScatterOp mapScatterOp) {
-    if (mapScatterOp.isIdentity()) {
-      rewriter.replaceOp(mapScatterOp, mapScatterOp.getInput());
+  // Clean up any identity map_store ops after combining.
+  funcOp->walk([&](MapStoreOp mapStoreOp) {
+    if (mapStoreOp.isIdentity()) {
+      rewriter.replaceOp(mapStoreOp, mapStoreOp.getInput());
     }
   });
   return success();
@@ -752,10 +853,10 @@ getCombineRelayoutOpsControlFn(IREE::Codegen::RelayoutCombinationScope scope) {
         return false;
       }
       // If there are only reshape ops, then bufferization can usually handle
-      // it, so don't introduce map_scatter.
+      // it, so don't introduce map_store.
       llvm::SetVector<Operation *> slice;
       BackwardSliceOptions options;
-      options.filter = isSupportedSingleInputRelayoutOp;
+      options.filter = isSupportedSingleInputRelayoutOpForResult;
       options.inclusive = true;
       LogicalResult result =
           getBackwardSlice(parallelInsertOp.getSource(), &slice, options);
@@ -805,22 +906,22 @@ struct CombineResultLayoutTransformationPass final
 } // namespace
 
 //===----------------------------------------------------------------------===//
-// Combining Layout Transformation Ops into MapGatherOp
+// Combining Layout Transformation Ops into MapLoadOp
 //===----------------------------------------------------------------------===//
 
-/// Folds `consumerOp` into the producer `mapGatherOp` using `rewriter`.
+/// Folds `consumerOp` into the producer `mapLoadOp` using `rewriter`.
 /// The `indexTransformBuilder` lambda defines how output indices of the new
-/// map_gather map to input indices of the original map_gather. Optionally,
+/// map_load map to input indices of the original map_load. Optionally,
 /// `newFillValue` can be provided to override the fill value (e.g., for pad).
 ///
 /// This handles the shared boilerplate:
 /// 1. Create new dest tensor from consumer result shape
-/// 2. Clone map_gather with new dest and region
+/// 2. Clone map_load with new dest and region
 /// 3. Apply index transformation via insertTransformationAtStart
 /// 4. Optionally update fill value
-/// 5. Replace consumer with new map_gather result
-static FailureOr<MapGatherOp> foldConsumerIntoMapGatherImpl(
-    RewriterBase &rewriter, Operation *consumerOp, MapGatherOp mapGatherOp,
+/// 5. Replace consumer with new map_load result
+static FailureOr<MapLoadOp> foldConsumerIntoMapLoadImpl(
+    RewriterBase &rewriter, Operation *consumerOp, MapLoadOp mapLoadOp,
     function_ref<SmallVector<Value>(ArrayRef<BlockArgument>)>
         indexTransformBuilder,
     std::optional<Value> newFillValue = std::nullopt) {
@@ -835,21 +936,21 @@ static FailureOr<MapGatherOp> foldConsumerIntoMapGatherImpl(
       tensor::getMixedSizes(rewriter, loc, consumerResult);
   Value newDest = tensor::EmptyOp::create(rewriter, loc, newSizes, elementType);
 
-  // Clone the map_gather with new dest.
-  auto newMapGather = MapGatherOp::create(rewriter, loc, newDest.getType(),
-                                          mapGatherOp.getSource(), newDest);
-  rewriter.cloneRegionBefore(mapGatherOp.getTransformationRegion(),
-                             newMapGather.getTransformationRegion(),
-                             newMapGather.getTransformationRegion().begin());
+  // Clone the map_load with new dest.
+  auto newMapLoad = MapLoadOp::create(rewriter, loc, newDest.getType(),
+                                      mapLoadOp.getSource(), newDest);
+  rewriter.cloneRegionBefore(mapLoadOp.getTransformationRegion(),
+                             newMapLoad.getTransformationRegion(),
+                             newMapLoad.getTransformationRegion().begin());
 
   // Prepend the index transformation.
   int64_t newRank = cast<ShapedType>(consumerResult.getType()).getRank();
-  newMapGather.insertTransformationAtStart(rewriter, indexTransformBuilder,
-                                           newRank);
+  newMapLoad.insertTransformationAtStart(rewriter, indexTransformBuilder,
+                                         newRank);
 
   // Optionally update fill value (for pad ops).
   if (newFillValue.has_value()) {
-    Block &transformBody = newMapGather.getTransformationRegion().front();
+    Block &transformBody = newMapLoad.getTransformationRegion().front();
     auto yieldOp =
         cast<IREE::LinalgExt::YieldOp>(transformBody.getTerminator());
     rewriter.modifyOpInPlace(yieldOp, [&]() {
@@ -857,41 +958,40 @@ static FailureOr<MapGatherOp> foldConsumerIntoMapGatherImpl(
     });
   }
 
-  rewriter.replaceOp(consumerOp, newMapGather.getResult(0));
+  rewriter.replaceOp(consumerOp, newMapLoad.getResult(0));
   LDBG() << "Folded consumer " << consumerOp->getName().getStringRef()
-         << " into map_gather:\n"
-         << newMapGather;
-  return newMapGather;
+         << " into map_load:\n"
+         << newMapLoad;
+  return newMapLoad;
 }
 
-/// Fold an `op` that does not affect index computation into a `mapGatherOp`.
+/// Fold an `op` that does not affect index computation into a `mapLoadOp`.
 /// This is used for ops like `linalg::CopyOp`.
-static FailureOr<MapGatherOp>
-foldIdentityLikeOpIntoMapGather(RewriterBase &rewriter, Operation *op,
-                                MapGatherOp mapGatherOp) {
-  assert(op->getOperand(0) == mapGatherOp.getResult(0) &&
-         "expected mapGatherOp to be the producer of op input");
-  rewriter.replaceOp(op, mapGatherOp.getResult(0));
+static FailureOr<MapLoadOp>
+foldIdentityLikeOpIntoMapLoad(RewriterBase &rewriter, Operation *op,
+                              MapLoadOp mapLoadOp) {
+  assert(op->getOperand(0) == mapLoadOp.getResult(0) &&
+         "expected mapLoadOp to be the producer of op input");
+  rewriter.replaceOp(op, mapLoadOp.getResult(0));
   LDBG() << "Folded consumer " << op->getName().getStringRef()
-         << " into map_gather (identity fold)";
-  return mapGatherOp;
+         << " into map_load (identity fold)";
+  return mapLoadOp;
 }
 
-/// Fold a consumer `transposeOp` into a producer `mapGatherOp`.
+/// Fold a consumer `transposeOp` into a producer `mapLoadOp`.
 /// For consumer folding, we apply the INVERSE permutation.
 /// Example: perm=[1,2,0] means output[i,j,k] = input[k,i,j] (inverse=[2,0,1]).
-static FailureOr<MapGatherOp>
-foldTransposeIntoMapGather(RewriterBase &rewriter,
-                           linalg::TransposeOp transposeOp,
-                           MapGatherOp mapGatherOp) {
-  assert(transposeOp.getInput() == mapGatherOp.getResult(0) &&
-         "expected mapGatherOp to be the producer of transposeOp input");
+static FailureOr<MapLoadOp>
+foldTransposeIntoMapLoad(RewriterBase &rewriter,
+                         linalg::TransposeOp transposeOp, MapLoadOp mapLoadOp) {
+  assert(transposeOp.getInput() == mapLoadOp.getResult(0) &&
+         "expected mapLoadOp to be the producer of transposeOp input");
 
   SmallVector<int64_t> inversePerm =
       invertPermutationVector(transposeOp.getPermutation());
 
-  return foldConsumerIntoMapGatherImpl(
-      rewriter, transposeOp, mapGatherOp,
+  return foldConsumerIntoMapLoadImpl(
+      rewriter, transposeOp, mapLoadOp,
       [inversePerm](ArrayRef<BlockArgument> indices) -> SmallVector<Value> {
         SmallVector<Value> indexValues(indices.begin(), indices.end());
         return applyPermutation(indexValues, inversePerm);
@@ -899,23 +999,29 @@ foldTransposeIntoMapGather(RewriterBase &rewriter,
 }
 
 /// Fold a consumer reshape op (expand_shape or collapse_shape) into a producer
-/// `mapGatherOp`. Index transformation: linearize in result space, delinearize
+/// `mapLoadOp`. Index transformation: linearize in result space, delinearize
 /// in source space.
 template <typename ReshapeOpTy>
-static FailureOr<MapGatherOp>
-foldReshapeIntoMapGather(RewriterBase &rewriter, ReshapeOpTy reshapeOp,
-                         MapGatherOp mapGatherOp) {
-  assert(reshapeOp.getSrc() == mapGatherOp.getResult(0) &&
-         "expected mapGatherOp to be the producer of reshapeOp input");
-
+static FailureOr<MapLoadOp> foldReshapeIntoMapLoad(RewriterBase &rewriter,
+                                                   ReshapeOpTy reshapeOp,
+                                                   MapLoadOp mapLoadOp) {
+  assert(reshapeOp.getSrc() == mapLoadOp.getResult(0) &&
+         "expected mapLoadOp to be the producer of reshapeOp input");
+  // Cannot fold if either side of the reshape is rank-0 (scalar). The result
+  // being rank-0 would make the new map_load output rank-0, and the source
+  // being rank-0 would produce an empty delinearization.
+  if (cast<RankedTensorType>(reshapeOp.getSrc().getType()).getRank() == 0 ||
+      cast<RankedTensorType>(reshapeOp.getResult().getType()).getRank() == 0) {
+    return failure();
+  }
   Location loc = reshapeOp->getLoc();
   SmallVector<OpFoldResult> srcDims =
       tensor::getMixedSizes(rewriter, loc, reshapeOp.getSrc());
   SmallVector<OpFoldResult> resultDims =
       tensor::getMixedSizes(rewriter, loc, reshapeOp.getResult());
 
-  return foldConsumerIntoMapGatherImpl(
-      rewriter, reshapeOp, mapGatherOp,
+  return foldConsumerIntoMapLoadImpl(
+      rewriter, reshapeOp, mapLoadOp,
       [&rewriter, loc, resultDims,
        srcDims](ArrayRef<BlockArgument> indices) -> SmallVector<Value> {
         SmallVector<Value> indexValues(indices.begin(), indices.end());
@@ -928,30 +1034,30 @@ foldReshapeIntoMapGather(RewriterBase &rewriter, ReshapeOpTy reshapeOp,
       });
 }
 
-/// Fold a consumer tensor::ExpandShapeOp into a producer `mapGatherOp`.
-static FailureOr<MapGatherOp>
-foldExpandShapeIntoMapGather(RewriterBase &rewriter,
-                             tensor::ExpandShapeOp expandShapeOp,
-                             MapGatherOp mapGatherOp) {
-  return foldReshapeIntoMapGather(rewriter, expandShapeOp, mapGatherOp);
+/// Fold a consumer tensor::ExpandShapeOp into a producer `mapLoadOp`.
+static FailureOr<MapLoadOp>
+foldExpandShapeIntoMapLoad(RewriterBase &rewriter,
+                           tensor::ExpandShapeOp expandShapeOp,
+                           MapLoadOp mapLoadOp) {
+  return foldReshapeIntoMapLoad(rewriter, expandShapeOp, mapLoadOp);
 }
 
-/// Fold a consumer tensor::CollapseShapeOp into a producer `mapGatherOp`.
-static FailureOr<MapGatherOp>
-foldCollapseShapeIntoMapGather(RewriterBase &rewriter,
-                               tensor::CollapseShapeOp collapseShapeOp,
-                               MapGatherOp mapGatherOp) {
-  return foldReshapeIntoMapGather(rewriter, collapseShapeOp, mapGatherOp);
+/// Fold a consumer tensor::CollapseShapeOp into a producer `mapLoadOp`.
+static FailureOr<MapLoadOp>
+foldCollapseShapeIntoMapLoad(RewriterBase &rewriter,
+                             tensor::CollapseShapeOp collapseShapeOp,
+                             MapLoadOp mapLoadOp) {
+  return foldReshapeIntoMapLoad(rewriter, collapseShapeOp, mapLoadOp);
 }
 
-/// Fold a consumer `extractSliceOp` into a producer `mapGatherOp`.
+/// Fold a consumer `extractSliceOp` into a producer `mapLoadOp`.
 /// Index transformation: original_idx = offset + new_idx * stride
-static FailureOr<MapGatherOp>
-foldExtractSliceIntoMapGather(RewriterBase &rewriter,
-                              tensor::ExtractSliceOp extractSliceOp,
-                              MapGatherOp mapGatherOp) {
-  assert(extractSliceOp.getSource() == mapGatherOp.getResult(0) &&
-         "expected mapGatherOp to be the producer of extractSliceOp input");
+static FailureOr<MapLoadOp>
+foldExtractSliceIntoMapLoad(RewriterBase &rewriter,
+                            tensor::ExtractSliceOp extractSliceOp,
+                            MapLoadOp mapLoadOp) {
+  assert(extractSliceOp.getSource() == mapLoadOp.getResult(0) &&
+         "expected mapLoadOp to be the producer of extractSliceOp input");
 
   if (extractSliceOp.getSourceType().getRank() !=
       extractSliceOp.getResultType().getRank()) {
@@ -983,18 +1089,43 @@ foldExtractSliceIntoMapGather(RewriterBase &rewriter,
     return originalIndices;
   };
 
-  return foldConsumerIntoMapGatherImpl(rewriter, extractSliceOp, mapGatherOp,
-                                       indexTransformBuilder);
+  return foldConsumerIntoMapLoadImpl(rewriter, extractSliceOp, mapLoadOp,
+                                     indexTransformBuilder);
 }
 
-/// Fold a consumer `padOp` into a producer `mapGatherOp`.
+/// Fold a consumer broadcast op (named or generic) into a producer `map_load`.
+static FailureOr<MapLoadOp>
+foldBroadcastIntoMapLoad(RewriterBase &rewriter, linalg::LinalgOp broadcastOp,
+                         MapLoadOp mapLoadOp) {
+  if (!linalg::isaBroadcastOpInterface(broadcastOp).has_value()) {
+    return rewriter.notifyMatchFailure(broadcastOp.getOperation(),
+                                       "op is not a broadcast");
+  }
+  assert(broadcastOp.getDpsInputs()[0] == mapLoadOp.getResult(0) &&
+         "expected map_load to be the producer of broadcast input");
+
+  AffineMap inputMap = broadcastOp.getIndexingMapsArray()[0];
+  return foldConsumerIntoMapLoadImpl(
+      rewriter, broadcastOp.getOperation(), mapLoadOp,
+      [inputMap](ArrayRef<BlockArgument> indices) -> SmallVector<Value> {
+        SmallVector<Value> sourceIndices;
+        sourceIndices.reserve(inputMap.getNumResults());
+        for (AffineExpr expr : inputMap.getResults()) {
+          unsigned pos = cast<AffineDimExpr>(expr).getPosition();
+          sourceIndices.push_back(indices[pos]);
+        }
+        return sourceIndices;
+      });
+}
+
+/// Fold a consumer `padOp` into a producer `mapLoadOp`.
 /// Index transformation: source_idx = new_idx - low_pad
 /// Fill value is set to the pad value.
-static FailureOr<MapGatherOp> foldPadIntoMapGather(RewriterBase &rewriter,
-                                                   tensor::PadOp padOp,
-                                                   MapGatherOp mapGatherOp) {
-  assert(padOp.getSource() == mapGatherOp.getResult(0) &&
-         "expected mapGatherOp to be the producer of padOp input");
+static FailureOr<MapLoadOp> foldPadIntoMapLoad(RewriterBase &rewriter,
+                                               tensor::PadOp padOp,
+                                               MapLoadOp mapLoadOp) {
+  assert(padOp.getSource() == mapLoadOp.getResult(0) &&
+         "expected mapLoadOp to be the producer of padOp input");
 
   // Only support constant pad values for now.
   Value padValue = padOp.getConstantPaddingValue();
@@ -1003,12 +1134,12 @@ static FailureOr<MapGatherOp> foldPadIntoMapGather(RewriterBase &rewriter,
         padOp, "non-constant padding value is not supported");
   }
 
-  // Check if the map_gather already has a real (non-poison) padding value.
+  // Check if the map_load already has a real (non-poison) padding value.
   // If so, we cannot safely replace it as that would lose the existing padding.
-  Value currentPadValue = mapGatherOp.getPaddingValue();
+  Value currentPadValue = mapLoadOp.getPaddingValue();
   if (!currentPadValue.getDefiningOp<ub::PoisonOp>()) {
     return rewriter.notifyMatchFailure(
-        padOp, "map_gather already has a non-poison padding value; folding "
+        padOp, "map_load already has a non-poison padding value; folding "
                "another pad would overwrite it");
   }
 
@@ -1028,48 +1159,50 @@ static FailureOr<MapGatherOp> foldPadIntoMapGather(RewriterBase &rewriter,
     return sourceIndices;
   };
 
-  return foldConsumerIntoMapGatherImpl(rewriter, padOp, mapGatherOp,
-                                       indexTransformBuilder, padValue);
+  return foldConsumerIntoMapLoadImpl(rewriter, padOp, mapLoadOp,
+                                     indexTransformBuilder, padValue);
 }
 
-/// Fold a consumer relayout op into a producer map_gather.
-FailureOr<MapGatherOp> foldIntoMapGather(RewriterBase &rewriter, Operation *op,
-                                         MapGatherOp mapGatherOp) {
-  return llvm::TypeSwitch<Operation *, FailureOr<MapGatherOp>>(op)
+/// Fold a consumer relayout op into a producer map_load.
+FailureOr<MapLoadOp> foldIntoMapLoad(RewriterBase &rewriter, Operation *op,
+                                     MapLoadOp mapLoadOp) {
+  return llvm::TypeSwitch<Operation *, FailureOr<MapLoadOp>>(op)
       .Case<linalg::CopyOp>([&](linalg::CopyOp copyOp) {
-        return foldIdentityLikeOpIntoMapGather(rewriter, copyOp, mapGatherOp);
+        return foldIdentityLikeOpIntoMapLoad(rewriter, copyOp, mapLoadOp);
       })
       .Case<linalg::TransposeOp>([&](linalg::TransposeOp transposeOp) {
-        return foldTransposeIntoMapGather(rewriter, transposeOp, mapGatherOp);
+        return foldTransposeIntoMapLoad(rewriter, transposeOp, mapLoadOp);
       })
       .Case<tensor::ExpandShapeOp>([&](tensor::ExpandShapeOp expandOp) {
-        return foldExpandShapeIntoMapGather(rewriter, expandOp, mapGatherOp);
+        return foldExpandShapeIntoMapLoad(rewriter, expandOp, mapLoadOp);
       })
       .Case<tensor::CollapseShapeOp>([&](tensor::CollapseShapeOp collapseOp) {
-        return foldCollapseShapeIntoMapGather(rewriter, collapseOp,
-                                              mapGatherOp);
+        return foldCollapseShapeIntoMapLoad(rewriter, collapseOp, mapLoadOp);
       })
       .Case<tensor::ExtractSliceOp>([&](tensor::ExtractSliceOp extractSliceOp) {
-        return foldExtractSliceIntoMapGather(rewriter, extractSliceOp,
-                                             mapGatherOp);
+        return foldExtractSliceIntoMapLoad(rewriter, extractSliceOp, mapLoadOp);
       })
       .Case<tensor::PadOp>([&](tensor::PadOp padOp) {
-        return foldPadIntoMapGather(rewriter, padOp, mapGatherOp);
+        return foldPadIntoMapLoad(rewriter, padOp, mapLoadOp);
+      })
+      .Case<linalg::LinalgOp>([&](linalg::LinalgOp linalgOp) {
+        return foldBroadcastIntoMapLoad(rewriter, linalgOp, mapLoadOp);
       })
       .Default([](Operation *) { return failure(); });
 }
 
-/// Pattern to fold consumer relayout ops into a producer map_gather.
-struct FoldConsumerRelayoutIntoMapGatherPattern
-    : public OpRewritePattern<IREE::LinalgExt::MapGatherOp> {
+/// Pattern to fold consumer relayout ops into a producer map_load.
+struct FoldConsumerRelayoutIntoMapLoadPattern
+    : public OpRewritePattern<IREE::LinalgExt::MapLoadOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(IREE::LinalgExt::MapGatherOp mapGatherOp,
+  LogicalResult matchAndRewrite(IREE::LinalgExt::MapLoadOp mapLoadOp,
                                 PatternRewriter &rewriter) const override {
-    // Find a consumer relayout op.
+    // Find a consumer relayout op (one that uses map_load result as its input).
     Operation *consumerOp = nullptr;
-    for (Operation *user : mapGatherOp->getUsers()) {
-      if (isSupportedSingleInputRelayoutOp(user)) {
+    Value mapLoadResult = mapLoadOp.getResult(0);
+    for (Operation *user : mapLoadOp->getUsers()) {
+      if (isRelayoutChainExtension(user, mapLoadResult)) {
         consumerOp = user;
         break;
       }
@@ -1077,65 +1210,74 @@ struct FoldConsumerRelayoutIntoMapGatherPattern
     if (!consumerOp) {
       return failure();
     }
-    if (failed(foldIntoMapGather(rewriter, consumerOp, mapGatherOp))) {
+    if (failed(foldIntoMapLoad(rewriter, consumerOp, mapLoadOp))) {
       return failure();
     }
     return success();
   }
 };
 
-// Insert identity map_gather op after the root and replace uses.
-static MapGatherOp insertIdentityMapGather(RewriterBase &rewriter,
-                                           OpResult root) {
+// Insert identity map_load op after the root and replace only uses whose
+// owner is in `complexChainUsers` (i.e. uses that are part of a complex
+// relayout chain). Other uses keep using the load/root directly.
+static MapLoadOp
+insertIdentityMapLoad(RewriterBase &rewriter, OpResult root,
+                      const SmallPtrSetImpl<Operation *> &complexChainUsers) {
   Location loc = root.getLoc();
   SetVector<OpOperand *> originalUses;
   for (OpOperand &use : root.getUses()) {
-    originalUses.insert(&use);
+    if (complexChainUsers.contains(use.getOwner())) {
+      originalUses.insert(&use);
+    }
   }
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPointAfterValue(root);
   Type elementType = getElementTypeOrSelf(root.getType());
   SmallVector<OpFoldResult> sizes = tensor::getMixedSizes(rewriter, loc, root);
-  Value mapGatherDest =
+  Value mapLoadDest =
       tensor::EmptyOp::create(rewriter, loc, sizes, elementType);
-  auto mapGatherOp =
-      MapGatherOp::createIdentityMapGather(rewriter, loc, root, mapGatherDest);
-  rewriter.replaceUsesWithIf(
-      root, mapGatherOp.getResult(0),
-      [&](OpOperand &use) { return originalUses.contains(&use); });
-  LDBG() << "Created identity map_gather:\n" << mapGatherOp;
-  return mapGatherOp;
+  auto mapLoadOp =
+      MapLoadOp::createIdentityMapLoad(rewriter, loc, root, mapLoadDest);
+  rewriter.replaceUsesWithIf(root, mapLoadOp.getResult(0), [&](OpOperand &use) {
+    return originalUses.contains(&use);
+  });
+  LDBG() << "Created identity map_load:\n" << mapLoadOp;
+  return mapLoadOp;
 }
 
-/// Insert identity map_gather op after a LoadFromBufferOp if it has relayout
-/// op consumers. The identity map_gather can then be used to fold consumer
+/// Insert identity map_load op after a LoadFromBufferOp if it has relayout
+/// op consumers. The identity map_load can then be used to fold consumer
 /// relayout ops into it iteratively.
-struct InsertMapGatherOpPattern
+struct InsertMapLoadOpPattern
     : public OpRewritePattern<IREE::Codegen::LoadFromBufferOp> {
-  using OpRewritePattern::OpRewritePattern;
+  InsertMapLoadOpPattern(MLIRContext *context, bool combineNonComplexChains)
+      : OpRewritePattern(context),
+        combineNonComplexChains(combineNonComplexChains) {}
 
   LogicalResult matchAndRewrite(IREE::Codegen::LoadFromBufferOp loadOp,
                                 PatternRewriter &rewriter) const override {
-    // Check if the load has at least one relayout op user.
-    bool hasRelayoutUser =
-        llvm::any_of(loadOp->getUsers(), [](Operation *user) {
-          return isSupportedSingleInputRelayoutOp(user);
-        });
-    if (!hasRelayoutUser) {
+    Value loadResult = loadOp.getResult();
+    SmallPtrSet<Operation *, 4> complexChainUsers =
+        getComplexChainRelayoutUsers(loadResult, combineNonComplexChains);
+    // Only introduce map_load when there is at least one complex chain.
+    if (complexChainUsers.empty()) {
       return failure();
     }
-    // Check that the load doesn't already have a map_gather user (avoid
+    // Check that the load doesn't already have a map_load user (avoid
     // infinite loop).
-    bool hasMapGatherUser =
-        llvm::any_of(loadOp->getUsers(), [](Operation *user) {
-          return isa<IREE::LinalgExt::MapGatherOp>(user);
-        });
-    if (hasMapGatherUser) {
+    bool hasMapLoadUser = llvm::any_of(loadOp->getUsers(), [](Operation *user) {
+      return isa<IREE::LinalgExt::MapLoadOp>(user);
+    });
+    if (hasMapLoadUser) {
       return failure();
     }
-    (void)insertIdentityMapGather(rewriter, loadOp->getResult(0));
+    (void)insertIdentityMapLoad(rewriter, cast<OpResult>(loadResult),
+                                complexChainUsers);
     return success();
   }
+
+private:
+  bool combineNonComplexChains;
 };
 
 namespace {
@@ -1154,11 +1296,11 @@ struct CombineSourceLayoutTransformationPass final
     IRRewriter rewriter(context);
     simplifyComplexRelayoutOps(rewriter, funcOp);
 
-    // Insert identity map_gather ops after load_from_buffer ops and fold
+    // Insert identity map_load ops after load_from_buffer ops and fold
     // consumer relayout ops into them.
     RewritePatternSet patterns(context);
-    patterns.add<InsertMapGatherOpPattern>(context);
-    patterns.add<FoldConsumerRelayoutIntoMapGatherPattern>(context);
+    patterns.add<InsertMapLoadOpPattern>(context, testCombineNonComplexChains);
+    patterns.add<FoldConsumerRelayoutIntoMapLoadPattern>(context);
     memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
     if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
       return signalPassFailure();

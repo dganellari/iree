@@ -81,7 +81,7 @@ struct InputDialectOptions {
   bool promoteF16ToF32 = false;
   bool promoteBF16ToF32 = false;
 
-  // Perfoms early optimizations geared towards optimizing/simplifying the
+  // Performs early optimizations geared towards optimizing/simplifying the
   // types of integer arithmetic inefficiencies that frontends typically
   // include and which are implicated in blocking downstream optimizations.
   bool optimizeIndexArithmetic = true;
@@ -186,6 +186,9 @@ struct GlobalOptimizationOptions {
 
   // Converts linalg named matmul ops to linalg generic ops.
   bool generalizeMatmul = false;
+
+  // Enables converting convolution operations to im2col + matmul form.
+  bool useIm2colForConvs = false;
 
   void bindOptions(OptionsBinder &binder);
   using FromFlags = OptionsFromFlags<GlobalOptimizationOptions>;

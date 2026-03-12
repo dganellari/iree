@@ -14,6 +14,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUEnums.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUInterfaces.h"
+#include "iree/compiler/Codegen/Dialect/GPU/TargetUtils/KnownTargets.h"
 #include "iree/compiler/Codegen/Interfaces/PartitionableLoopsInterface.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
@@ -36,7 +37,7 @@
 #define DEBUG_TYPE "iree-gpu-config-utils"
 
 static llvm::cl::opt<bool> clGPUTestCpromotion(
-    "iree-codegen-test-c-promtion",
+    "iree-codegen-test-c-promotion",
     llvm::cl::desc("C promote in specific case of elemetwise operations that "
                    "codegen cant yet support without it if also doing padding"),
     llvm::cl::init(true));
@@ -52,7 +53,8 @@ constexpr int64_t kPreferredCopyNumBits = 128;
 
 LogicalResult setDataTiledMmaInnerTiledLoweringConfig(
     IREE::GPU::TargetAttr target, mlir::FunctionOpInterface entryPoint,
-    Operation *op, IREE::Codegen::UKernelDescriptorAttr ukernelConfig) {
+    Operation *op, IREE::Codegen::UKernelDescriptorAttr ukernelConfig,
+    std::optional<uint64_t> prefetchNumStages) {
   auto multiMmaOp = dyn_cast<IREE::Codegen::InnerTiledOp>(op);
   if (!multiMmaOp) {
     return failure();
@@ -109,11 +111,12 @@ LogicalResult setDataTiledMmaInnerTiledLoweringConfig(
   DictionaryAttr configDict = b.getDictionaryAttr(attrs);
   auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(context, configDict);
 
-  // Don't add any special padding or prefetching, since the data-tiled layout
-  // is already what we want.
+  // By default, don't add any special padding or prefetching, since the
+  // data-tiled layout is already what we want.
   SmallVector<NamedAttribute, 1> pipelineAttrs;
+  int64_t prefetchStages = prefetchNumStages.value_or(0);
   auto pipelineOptions = IREE::GPU::GPUPipelineOptionsAttr::get(
-      context, /*prefetchNumStages=*/0,
+      context, /*prefetchNumStages=*/prefetchStages,
       /*no_reduce_shared_memory_bank_conflicts=*/true,
       /*use_igemm_convolution=*/false,
       /*reorder_workgroups_strategy=*/std::nullopt);
@@ -169,6 +172,7 @@ namespace {
 struct GemmCutoff {
   float smallGemmCutoff = 0.0f;
   float largeGemmCutoff = 0.0f;
+  float veryLargeGemmCutoff = 0.0f;
 };
 } // namespace
 
@@ -178,18 +182,20 @@ static GemmCutoff computeGemmCutoffsForAI(IREE::GPU::TargetAttr target,
                                           Type computeType, bool scaled) {
   float smallGemmCutoff = 1.0f;
   float largeGemmCutoff = 1000.0f;
+  float veryLargeGemmCutoff = 7000.0f;
 
   // Use default gemm cutoffs for scaled matmuls for now. Choosing appropriate
   // cutoffs will require tuning and there is still a lot of performance work
   // left to do before any analysis done on tuning data is actionable.
   // See https://github.com/iree-org/iree/issues/22785 for details.
   if (scaled) {
-    return {100.0f, 10000.0f};
+    return {100.0f, 10000.0f, 70000.0f};
   }
   if (!target.getChip()) {
     LDBG() << "Target chip is not specified, using default gemm cutoffs: "
-           << smallGemmCutoff << ", " << largeGemmCutoff;
-    return {smallGemmCutoff, largeGemmCutoff};
+           << smallGemmCutoff << ", " << largeGemmCutoff << ", "
+           << veryLargeGemmCutoff;
+    return {smallGemmCutoff, largeGemmCutoff, veryLargeGemmCutoff};
   }
 
   TargetChipAttr chip = target.getChip();
@@ -223,8 +229,9 @@ static GemmCutoff computeGemmCutoffsForAI(IREE::GPU::TargetAttr target,
   if (!peakPerfTflopsFound || !memoryBandwidthFound) {
     LDBG() << "Target chip does not have peak performance or memory bandwidth "
               "information, using default gemm cutoffs: "
-           << smallGemmCutoff << ", " << largeGemmCutoff;
-    return {smallGemmCutoff, largeGemmCutoff};
+           << smallGemmCutoff << ", " << largeGemmCutoff << ", "
+           << veryLargeGemmCutoff;
+    return {smallGemmCutoff, largeGemmCutoff, veryLargeGemmCutoff};
   }
 
   // TODO: Attempt to use number of elements loaded per second instead of
@@ -245,92 +252,31 @@ static GemmCutoff computeGemmCutoffsForAI(IREE::GPU::TargetAttr target,
   // based on the approach in https://github.com/iree-org/iree/discussions/21506
   smallGemmCutoff = 0.05f * computeMemoryCutoff;
   largeGemmCutoff = 5.0f * computeMemoryCutoff;
+  veryLargeGemmCutoff = 22.0f * computeMemoryCutoff;
   LDBG() << "Target chip small gemm cutoff: " << smallGemmCutoff
-         << ", large gemm cutoff: " << largeGemmCutoff;
-  return {smallGemmCutoff, largeGemmCutoff};
+         << ", large gemm cutoff: " << largeGemmCutoff
+         << ", very large gemm cutoff: " << veryLargeGemmCutoff;
+  return {smallGemmCutoff, largeGemmCutoff, veryLargeGemmCutoff};
 }
 
+/// Returns architecture-specific GPUMMAHeuristicSeeds for the given target,
+/// problem size category (GemmSizeKind), and operation type (gemm, scaled
+/// gemm, or convolution).
 static std::optional<GPUMMAHeuristicSeeds>
-getGemmHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth, bool scaled) {
-  switch (gemmSize) {
-  case GemmSize::SmallGemm:
-    return GPUMMAHeuristicSeeds(
-        {/*bestSubgroupCountPerWorkgroup=*/2,
-         /*bestMNTileCountPerSubgroup=*/2,
-         /*bestKTileCountPerSubgroup=*/4,
-         /*bestKElementCountPerSubgroup=*/2 * kCacheLineSizeBits / inBitWidth});
-  case GemmSize::MediumGemm:
-    if (scaled) {
-      return GPUMMAHeuristicSeeds(
-          {/*bestSubgroupCountPerWorkgroup=*/8,
-           /*bestMNTileCountPerSubgroup=*/32,
-           /*bestKTileCountPerSubgroup=*/4,
-           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
-               inBitWidth});
-    }
-    return GPUMMAHeuristicSeeds(
-        {/*bestSubgroupCountPerWorkgroup=*/4,
-         /*bestMNTileCountPerSubgroup=*/8,
-         /*bestKTileCountPerSubgroup=*/4,
-         /*bestKElementCountPerSubgroup=*/2 * kCacheLineSizeBits / inBitWidth});
-  case GemmSize::LargeGemm:
-    if (scaled) {
-      return GPUMMAHeuristicSeeds(
-          {/*bestSubgroupCountPerWorkgroup=*/8,
-           /*bestMNTileCountPerSubgroup=*/32,
-           /*bestKTileCountPerSubgroup=*/2,
-           /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 /
-               inBitWidth});
-    }
-    return GPUMMAHeuristicSeeds(
-        {/*bestSubgroupCountPerWorkgroup=*/4,
-         /*bestMNTileCountPerSubgroup=*/16,
-         /*bestKTileCountPerSubgroup=*/2,
-         /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 / inBitWidth});
-  default:
-    assert(false && "Unhandled gemm size");
-    return std::nullopt;
-  }
-}
-
-static std::optional<GPUMMAHeuristicSeeds>
-getConvolutionHeuristicSeeds(GemmSize gemmSize, int64_t inBitWidth) {
-  switch (gemmSize) {
-  case GemmSize::SmallGemm:
-    return GPUMMAHeuristicSeeds(
-        {/*bestSubgroupCountPerWorkgroup=*/2,
-         /*bestMNTileCountPerSubgroup=*/2,
-         /*bestKTileCountPerSubgroup=*/4,
-         /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / inBitWidth});
-  case GemmSize::MediumGemm:
-    return GPUMMAHeuristicSeeds(
-        {/*bestSubgroupCountPerWorkgroup=*/8,
-         /*bestMNTileCountPerSubgroup=*/4,
-         /*bestKTileCountPerSubgroup=*/4,
-         /*bestKElementCountPerSubgroup=*/2 * kCacheLineSizeBits / inBitWidth});
-  case GemmSize::LargeGemm:
-    // Favor more subgroups for convolution to help latency hiding from global
-    // loads.
-    return GPUMMAHeuristicSeeds(
-        {/*bestSubgroupCountPerWorkgroup=*/8,
-         /*bestMNTileCountPerSubgroup=*/8,
-         /*bestKTileCountPerSubgroup=*/2,
-         /*bestKElementCountPerSubgroup=*/kCacheLineSizeBits / 2 / inBitWidth});
-  default:
-    assert(false && "Unhandled convolution gemm size");
-    return std::nullopt;
-  }
-}
-
-static std::optional<GPUMMAHeuristicSeeds>
-getContractionHeuristicSeeds(GPUMatmulShapeType problem, bool isGemm,
+getContractionHeuristicSeeds(IREE::GPU::TargetAttr target,
+                             GPUMatmulShapeType problem, bool isGemm,
                              bool scaled) {
-  GemmSize gemmSize = problem.gemmSize;
-  int64_t inBitWidth = problem.aType.getIntOrFloatBitWidth();
-  if (isGemm) {
-    return getGemmHeuristicSeeds(gemmSize, inBitWidth, scaled);
-  }
-  return getConvolutionHeuristicSeeds(gemmSize, inBitWidth);
+  const ArchSeedSet &archSeeds = getArchSeedSet(target);
+  assert(problem.gemmSize.has_value() && "GemmSizeKind must be set");
+
+  // Pick the right category, index by GemmSizeKind, then convert the stored
+  // K-element bits to an actual element count.
+  const GPUMMAHeuristicSeeds *table =
+      !isGemm ? archSeeds.conv
+              : (scaled ? archSeeds.scaledGemm : archSeeds.gemm);
+  GPUMMAHeuristicSeeds result = table[static_cast<int>(*problem.gemmSize)];
+  result.bestKElementCountPerSubgroup /= problem.aType.getIntOrFloatBitWidth();
+  return result;
 }
 
 /// Given a target and a matmul problem, try to find an MMA schedule for the
@@ -340,9 +286,9 @@ getContractionHeuristicSeeds(GPUMatmulShapeType problem, bool isGemm,
 /// accumulator that needs to be loaded from global memory (matmul_accumulate).
 static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
     IREE::GPU::TargetAttr target, GPUMatmulShapeType problem, Location loc,
-    bool transposedLhs, bool transposedRhs, bool isGemm,
-    bool mustBeAligned = true, bool doCPromotion = false, bool scaled = false,
-    int64_t splitReductionTripCnt = 0) {
+    bool transposedLhs, bool transposedRhs, bool isGemm, bool scaled,
+    bool useDirectLoad, int64_t prefetchNumStages, bool mustBeAligned = true,
+    bool doCPromotion = false, int64_t splitReductionTripCnt = 0) {
   const int64_t targetSubgroupSize = target.getPreferredSubgroupSize();
   SmallVector<GPUIntrinsicType> intrinsics;
   if (scaled) {
@@ -411,20 +357,25 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
   if (computeIntensity <= gemmCutoffs.smallGemmCutoff) {
     // For matmuls with small arithmetic intensity, use small
     // bestMNTileCountPerSubgroup and large bestKTileCountPerSubgroup.
-    problem.gemmSize = GemmSize::SmallGemm;
+    problem.gemmSize = GemmSizeKind::SmallGemm;
+  } else if (computeIntensity >= gemmCutoffs.veryLargeGemmCutoff) {
+    // For very large matmuls, prefer low-VGPR-pressure intrinsics (e.g.,
+    // 32x32x16 over 16x16x32) which provide higher compute throughput per
+    // register.
+    problem.gemmSize = GemmSizeKind::VeryLargeGemm;
   } else if (computeIntensity >= gemmCutoffs.largeGemmCutoff) {
     // For matmuls with large arithmetic intensity, use large
     // bestMNTileCountPerSubgroup and small bestKTileCountPerSubgroup to
     // amortize launch/memory costs and maximize throughput.
-    problem.gemmSize = GemmSize::LargeGemm;
+    problem.gemmSize = GemmSizeKind::LargeGemm;
   } else {
     // Choose balanced tile shapes. Empirically, medium-AI workloads can favor
     // either small or large tiles depending on kernel details.
-    problem.gemmSize = GemmSize::MediumGemm;
+    problem.gemmSize = GemmSizeKind::MediumGemm;
   }
-  LDBG() << "This config is " << problem.gemmSize;
+  LDBG() << "This config is " << *problem.gemmSize;
   std::optional<GPUMMAHeuristicSeeds> maybeSeeds =
-      getContractionHeuristicSeeds(problem, isGemm, scaled);
+      getContractionHeuristicSeeds(target, problem, isGemm, scaled);
   assert(maybeSeeds.has_value() && "expected seeds to be found");
   GPUMMAHeuristicSeeds seeds = maybeSeeds.value();
 
@@ -439,7 +390,8 @@ static std::optional<GPUMMASchedule> getMmaScheduleFromProblemAndTarget(
   std::optional<GPUMMASchedule> schedule = deduceMMASchedule(
       problem, intrinsics, seeds, maxSharedMemoryBytes, targetSubgroupSize,
       wgpCount, loc, transposedLhs, transposedRhs, /*canUpcastAcc=*/false,
-      /*mustBeAligned=*/mustBeAligned, doCPromotion, splitReductionTripCnt);
+      useDirectLoad, prefetchNumStages, /*mustBeAligned=*/mustBeAligned,
+      doCPromotion, splitReductionTripCnt);
   return schedule;
 }
 
@@ -591,7 +543,7 @@ getSplitReductionTripCount(mlir::FunctionOpInterface entryPoint) {
 
 /// Helper to check if a linalg operation has elementwise users that have
 /// additional operands beyond the result of the linalg operation.
-/// This function a workaround until we have map_gather op that
+/// This function a workaround until we have map_load op that
 /// can allow us to codegen without c promotion for such elementwise ops
 /// we will track progress of this in
 /// https://github.com/iree-org/iree/issues/23038
@@ -619,7 +571,7 @@ static bool checkForElementwiseUsersWithNewOperands(linalg::LinalgOp linalgOp) {
 
 /// Returns true if any of the DPS init operands of the `dpsOp` are produced by
 /// a LinalgOp or LinalgExtOp. This is a workaround constraint for C promotion
-/// in cases that will require map_gather to codegen without C promotion.
+/// in cases that will require map_load to codegen without C promotion.
 /// Progress is being tracked in https://github.com/iree-org/iree/issues/23038.
 static bool
 checkForDPSOperandComputeOpProducers(DestinationStyleOpInterface dpsOp) {
@@ -652,9 +604,10 @@ checkForDPSOperandComputeOpProducers(DestinationStyleOpInterface dpsOp) {
 static FailureOr<std::pair<LoweringConfigAttr, int64_t>>
 getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     ArrayRef<int64_t> bounds, ArrayRef<AffineMap> maps,
-    ArrayRef<Value> operands, IREE::GPU::TargetAttr target, bool useDirectLoad,
-    bool isGemm, bool scaled, int64_t splitReductionTripCnt,
-    bool cPromoteIfPadding, bool hasExistingAccumulator = false,
+    ArrayRef<Value> operands, IREE::GPU::TargetAttr target, bool isGemm,
+    bool scaled, bool useDirectLoad, int64_t prefetchNumStages,
+    int64_t splitReductionTripCnt, bool cPromoteIfPadding,
+    bool hasExistingAccumulator = false,
     std::optional<ConvToIgemmInfo> convToIgemmInfo = std::nullopt) {
   if (target.getWgp().getMma().empty()) {
     return failure();
@@ -831,6 +784,16 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
                              lhsScaleType,
                              rhsScaleType};
 
+  // TODO(#22119): We don't use global load DMA for scaled matmuls, because
+  // compilation doesn't support it. Once this is fixed, we should use global
+  // load DMA here when possible.
+  Location loc = operands[0].getLoc();
+  if (scaled && useDirectLoad) {
+    mlir::emitWarning(loc) << "direct load (global load DMA) is not yet "
+                              "supported for scaled matmuls, ignoring";
+    useDirectLoad = false;
+  }
+
   // Accumulator needs shared memory if:
   // - Padding requires C promotion, OR
   // - The operation has an existing accumulator (matmul_accumulate)
@@ -838,10 +801,10 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
       (couldNeedPadding && cPromoteIfPadding) || hasExistingAccumulator;
 
   bool mustBeAligned = true;
-  Location loc = operands[0].getLoc();
   std::optional<GPUMMASchedule> schedule = getMmaScheduleFromProblemAndTarget(
-      target, problem, loc, transposedLhs, transposedRhs, isGemm,
-      /*mustBeAligned=*/true, doCPromotion, scaled, splitReductionTripCnt);
+      target, problem, loc, transposedLhs, transposedRhs, isGemm, scaled,
+      useDirectLoad, prefetchNumStages, /*mustBeAligned=*/true, doCPromotion,
+      splitReductionTripCnt);
 
   if (!schedule && canSupportUnaligned) {
     LDBG() << "Attempting to deduce unaligned TileAndFuse MMA schedule";
@@ -850,8 +813,9 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
     // accumulator.
     bool doCPromotionUnaligned = cPromoteIfPadding || hasExistingAccumulator;
     schedule = getMmaScheduleFromProblemAndTarget(
-        target, problem, loc, transposedLhs, transposedRhs, isGemm,
-        mustBeAligned, doCPromotionUnaligned, scaled, splitReductionTripCnt);
+        target, problem, loc, transposedLhs, transposedRhs, isGemm, scaled,
+        useDirectLoad, prefetchNumStages, mustBeAligned, doCPromotionUnaligned,
+        splitReductionTripCnt);
   }
 
   if (!schedule) {
@@ -937,13 +901,13 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
 
   // Use global load DMA attribute (subgroup sizes will be derived from
   // translation_info).
-  Attribute useGlobalDma = IREE::GPU::UseGlobalLoadDMAAttr::get(context);
-  SmallVector<Attribute> promotionArray = {useGlobalDma, useGlobalDma};
+  SmallVector<Attribute> promotionArray;
+  if (useDirectLoad) {
+    Attribute useGlobalDma = IREE::GPU::UseGlobalLoadDMAAttr::get(context);
+    promotionArray = {useGlobalDma, useGlobalDma};
+  }
   SmallVector<int64_t> promotionList = {0, 1};
   if (scaled) {
-    // TODO(#22119): We don't use global load DMA for scaled matmuls, because
-    // compilation doesn't support it. Once this is fixed, we should use global
-    // load DMA here when possible.
     promotionList.append({2, 3});
     auto defaultConfigAttr = IREE::GPU::DerivedThreadConfigAttr::get(context);
     // TODO(#23329): Do not swizzle shapes that have no bank conflicts.
@@ -970,11 +934,8 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
           IREE::GPU::DerivedThreadConfigAttr::get(context));
     }
   }
-  ArrayRef<Attribute> promotionTypes = useDirectLoad
-                                           ? ArrayRef<Attribute>(promotionArray)
-                                           : ArrayRef<Attribute>{};
   GPU::appendPromotedOperandsList(context, attrs, promotionList,
-                                  promotionTypes);
+                                  promotionArray);
   if (!mustBeAligned || couldNeedPadding) {
     SmallVector<int64_t> paddingTileSizes = workgroupTileSizes;
 
@@ -1014,7 +975,8 @@ getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
 
 LogicalResult setIGEMMConvolutionLoweringConfig(
     IREE::GPU::TargetAttr target, mlir::FunctionOpInterface entryPoint,
-    Operation *op, bool useDirectLoad, bool padConv) {
+    Operation *op, bool useDirectLoad, bool padConv,
+    std::optional<uint64_t> prefetchNumStages) {
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
   if (!linalgOp || !linalg::isaConvolutionOpInterface(linalgOp)) {
     return failure();
@@ -1086,11 +1048,13 @@ LogicalResult setIGEMMConvolutionLoweringConfig(
   // Detect if the convolution is accumulating (reads existing accumulator).
   bool hasExistingAccumulator = isValidInPlaceAccumulatingOp(
       cast<DestinationStyleOpInterface>(linalgOp.getOperation()));
+  // Default to 2 stages if not specified.
+  int64_t prefetchStages = prefetchNumStages.value_or(2);
   FailureOr<std::pair<LoweringConfigAttr, int64_t>> configAndWgSize =
       getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
           igemmLoopBounds, igemmContractionMaps, igemmOperands, target,
-          useDirectLoad, /*isGemm=*/false,
-          /*scaled=*/false, splitReductionTripCnt,
+          /*isGemm=*/false, /*scaled=*/false, useDirectLoad, prefetchStages,
+          splitReductionTripCnt,
           /*cPromoteIfPadding=*/cPromoteIfPadding, hasExistingAccumulator,
           convToIgemmInfo);
   if (failed(configAndWgSize)) {
@@ -1101,7 +1065,8 @@ LogicalResult setIGEMMConvolutionLoweringConfig(
 
   SmallVector<NamedAttribute, 1> pipelineAttrs;
   auto pipelineOptions = IREE::GPU::GPUPipelineOptionsAttr::get(
-      linalgOp->getContext(), /*prefetchNumStages=*/2,
+      linalgOp->getContext(),
+      /*prefetchNumStages=*/prefetchStages,
       /*no_reduce_shared_memory_bank_conflicts=*/useDirectLoad,
       /*use_igemm_convolution=*/true,
       /*reorder_workgroups_strategy=*/std::nullopt);
@@ -1118,9 +1083,11 @@ LogicalResult setIGEMMConvolutionLoweringConfig(
       workgroupSize, targetSubgroupSize, pipelineConfig);
 }
 
-LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
-                                      mlir::FunctionOpInterface entryPoint,
-                                      Operation *op, bool useDirectLoad) {
+LogicalResult
+setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
+                        mlir::FunctionOpInterface entryPoint, Operation *op,
+                        bool useDirectLoad,
+                        std::optional<uint64_t> prefetchNumStages) {
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
   if (!linalgOp ||
       (!linalg::isaContractionOpInterface(linalgOp) &&
@@ -1146,21 +1113,25 @@ LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
   bool hasExistingAccumulator = isValidInPlaceAccumulatingOp(
       cast<DestinationStyleOpInterface>(linalgOp.getOperation()));
 
+  // Default to 2 stages if not specified.
+  int64_t prefetchStages = prefetchNumStages.value_or(2);
+
+  bool isScaled = false;
   FailureOr<std::pair<LoweringConfigAttr, int64_t>> configAndWgSize =
       getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
-          bounds, maps, operands, target, useDirectLoad, /*isGemm=*/true,
-          /*scaled=*/false, splitReductionTripCnt, cPromoteIfPadding,
-          hasExistingAccumulator);
+          bounds, maps, operands, target, /*isGemm=*/true, isScaled,
+          useDirectLoad, prefetchStages, splitReductionTripCnt,
+          cPromoteIfPadding, hasExistingAccumulator);
 
   // TODO (muzasyed) : add generalization for scaled and nonscaled versions of
   // matmul lowering.
   if (failed(configAndWgSize)) {
     // TODO (muzasyed) : Perform padding appropriately for minimizing bank
     // conflicts when dealing with scaled matmuls. For now it is disabled.
-    useDirectLoad = true;
+    isScaled = true;
     configAndWgSize = getMatmulOrIGEMMLoweringConfigAndWorkgroupSize(
-        bounds, maps, operands, target, useDirectLoad, /*isGemm=*/true,
-        /*scaled=*/true, splitReductionTripCnt, cPromoteIfPadding,
+        bounds, maps, operands, target, /*isGemm=*/true, isScaled,
+        useDirectLoad, prefetchStages, splitReductionTripCnt, cPromoteIfPadding,
         hasExistingAccumulator);
   }
 
@@ -1172,8 +1143,9 @@ LogicalResult setMatmulLoweringConfig(IREE::GPU::TargetAttr target,
 
   SmallVector<NamedAttribute, 1> pipelineAttrs;
   auto pipelineOptions = IREE::GPU::GPUPipelineOptionsAttr::get(
-      linalgOp->getContext(), /*prefetchNumStages=*/2,
-      /*no_reduce_shared_memory_bank_conflicts=*/useDirectLoad,
+      linalgOp->getContext(),
+      /*prefetchNumStages=*/prefetchStages,
+      /*no_reduce_shared_memory_bank_conflicts=*/useDirectLoad || isScaled,
       /*use_igemm_convolution=*/false,
       /*reorder_workgroups_strategy=*/std::nullopt);
   pipelineAttrs.emplace_back(
@@ -1330,16 +1302,16 @@ getSupportedPartitionableLoops(linalg::LinalgOp linalgOp) {
 
 static FailureOr<DistributionInfo> collectOpDistributionInfo(Operation *op) {
   DistributionInfo distInfo;
-  // MapScatterOp doesn't fit the LinalgOp interface, so use special case logic
+  // MapStoreOp doesn't fit the LinalgOp interface, so use special case logic
   // to get the distribution info.
-  if (auto mapScatterOp = dyn_cast<IREE::LinalgExt::MapScatterOp>(op)) {
+  if (auto mapStoreOp = dyn_cast<IREE::LinalgExt::MapStoreOp>(op)) {
     distInfo.partitionableLoops =
-        llvm::to_vector(llvm::seq<unsigned int>(mapScatterOp.getInputRank()));
+        llvm::to_vector(llvm::seq<unsigned int>(mapStoreOp.getInputRank()));
     distInfo.vectorizable = false;
-    distInfo.minBitwidth = mapScatterOp.getInputType().getElementTypeBitWidth();
+    distInfo.minBitwidth = mapStoreOp.getInputType().getElementTypeBitWidth();
     distInfo.representativeBitWidth = distInfo.minBitwidth;
     distInfo.loopBounds =
-        SmallVector<int64_t>(mapScatterOp.getInputType().getShape());
+        SmallVector<int64_t>(mapStoreOp.getInputType().getShape());
     return distInfo;
   }
 
@@ -1439,7 +1411,7 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
   const unsigned scaleToByte =
       std::max(8 / distInfo.minBitwidth, static_cast<unsigned>(1));
 
-  // Distribute workload to the given `numThreads` by allowing a potental loss.
+  // Distribute workload to the given `numThreads` by allowing a potential loss.
   auto distributeToThreads = [&](int64_t numThreads,
                                  std::optional<int64_t> lossFactor =
                                      std::nullopt) -> int64_t {
@@ -1617,7 +1589,7 @@ LogicalResult setTileAndFuseLoweringConfig(IREE::GPU::TargetAttr target,
   // Heuristic value chosen to limit maximum vector sizes when tiling below.
   const unsigned maxVectorSize = 32;
 
-  // Try to tile all reductions by some small factor, preferrably 4, when
+  // Try to tile all reductions by some small factor, preferably 4, when
   // possible. This gives us a chance to perform vector4 load if an input has
   // its innnermost dimension being reduction. It also avoids generating too
   // many instructions when unrolling vector later. We limit the expected
@@ -1779,10 +1751,9 @@ LogicalResult setScatterLoweringConfig(IREE::GPU::TargetAttr target,
       {flatWorkgroupSize, 1, 1}, flatWorkgroupSize, DictionaryAttr());
 }
 
-LogicalResult
-setDirectConvolutionLoweringConfig(IREE::GPU::TargetAttr target,
-                                   mlir::FunctionOpInterface entryPoint,
-                                   Operation *op) {
+LogicalResult setDirectConvolutionLoweringConfig(
+    IREE::GPU::TargetAttr target, mlir::FunctionOpInterface entryPoint,
+    Operation *op, std::optional<uint64_t> prefetchNumStages) {
   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
   if (!linalgOp || !linalg::isaConvolutionOpInterface(linalgOp)) {
     return failure();
@@ -1930,19 +1901,23 @@ setDirectConvolutionLoweringConfig(IREE::GPU::TargetAttr target,
   }
   bool transposedLhs = mPos > lhsKPos;
   bool transposedRhs = rhsKPos > nPos;
+  // By default, prefetch shared memory is kept off.
+  int64_t prefetchStages = prefetchNumStages.value_or(0);
   bool mustBeAligned = true;
   std::optional<GPUMMASchedule> schedule = getMmaScheduleFromProblemAndTarget(
       target, problem, linalgOp.getLoc(), transposedLhs, transposedRhs,
-      /*isGemm=*/false, mustBeAligned, /*doCPromotion=*/false,
-      /*scaled=*/false, splitReductionTripCnt);
+      /*isGemm=*/false, /*scaled=*/false, /*useDirectLoad=*/false,
+      prefetchStages, mustBeAligned, /*doCPromotion=*/false,
+      splitReductionTripCnt);
 
   if (!schedule && canSupportUnaligned) {
     LDBG() << "Attempting to deduce unaligned TileAndFuse MMA schedule";
     mustBeAligned = false;
     schedule = getMmaScheduleFromProblemAndTarget(
         target, problem, linalgOp.getLoc(), transposedLhs, transposedRhs,
-        /*isGemm=*/false, mustBeAligned, /*doCPromotion=*/false,
-        /*scaled=*/false, splitReductionTripCnt);
+        /*isGemm=*/false, /*scaled=*/false, /*useDirectLoad=*/false,
+        prefetchStages, mustBeAligned, /*doCPromotion=*/false,
+        splitReductionTripCnt);
   }
   if (!schedule) {
     LDBG() << "Failed to deduce TileAndFuse MMA schedule";
@@ -2027,9 +2002,8 @@ setDirectConvolutionLoweringConfig(IREE::GPU::TargetAttr target,
   auto configDict = DictionaryAttr::get(context, attrs);
   auto loweringConfig = IREE::GPU::LoweringConfigAttr::get(context, configDict);
 
-  // Prefetch shared memory is kept off.
   auto pipelineOptions = IREE::GPU::GPUPipelineOptionsAttr::get(
-      context, /*prefetchNumStages=*/0,
+      context, /*prefetchNumStages=*/prefetchStages,
       /*no_reduce_shared_memory_bank_conflicts=*/false,
       /*use_igemm_convolution=*/false,
       /*reorder_workgroups_strategy=*/std::nullopt);

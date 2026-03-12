@@ -19,10 +19,12 @@ iree_cc_library(
     "Interfaces.cpp"
   DEPS
     ::BufferizationInterfaces
+    ::HoistableRegionOpInterface
     ::PartitionableLoopsInterface
     ::ProcessorOpInterfaces
     ::TensorMaskingOpInterface
     ::UKernelOpInterface
+    ::VectorizableOpInterface
     IREELinalgTransformDialect
     MLIRAMDGPUDialect
     MLIRAffineDialect
@@ -39,6 +41,7 @@ iree_cc_library(
     MLIRMemRefTransformOps
     MLIRSCFDialect
     MLIRSCFTransformOps
+    MLIRSideEffectInterfaces
     MLIRTensorDialect
     MLIRTensorTransformOps
     MLIRTensorTransforms
@@ -93,6 +96,32 @@ iree_cc_library(
 
 iree_cc_library(
   NAME
+    HoistableRegionOpInterface
+  HDRS
+    "HoistableRegionOpInterface.h"
+  TEXTUAL_HDRS
+    "HoistableRegionOpInterface.cpp.inc"
+    "HoistableRegionOpInterface.h.inc"
+  SRCS
+    "HoistableRegionOpInterface.cpp"
+  DEPS
+    ::HoistableRegionOpInterfaceGen
+    MLIRIR
+  PUBLIC
+)
+
+iree_tablegen_library(
+  NAME
+    HoistableRegionOpInterfaceGen
+  TD_FILE
+    "HoistableRegionOpInterface.td"
+  OUTS
+    --gen-op-interface-decls HoistableRegionOpInterface.h.inc
+    --gen-op-interface-defs HoistableRegionOpInterface.cpp.inc
+)
+
+iree_cc_library(
+  NAME
     UKernelOpInterface
   HDRS
     "UKernelOpInterface.h"
@@ -116,6 +145,40 @@ iree_tablegen_library(
   OUTS
     --gen-op-interface-decls UKernelOpInterface.h.inc
     --gen-op-interface-defs UKernelOpInterface.cpp.inc
+)
+
+iree_tablegen_library(
+  NAME
+    VectorizableOpInterfaceGen
+  TD_FILE
+    "VectorizableOpInterface.td"
+  OUTS
+    --gen-op-interface-decls VectorizableOpInterface.h.inc
+    --gen-op-interface-defs VectorizableOpInterface.cpp.inc
+)
+
+iree_cc_library(
+  NAME
+    VectorizableOpInterface
+  HDRS
+    "VectorizableOpInterface.h"
+  TEXTUAL_HDRS
+    "VectorizableOpInterface.cpp.inc"
+    "VectorizableOpInterface.h.inc"
+  SRCS
+    "VectorizableOpInterface.cpp"
+  DEPS
+    ::VectorizableOpInterfaceGen
+    MLIRAnalysis
+    MLIRArithDialect
+    MLIRIR
+    MLIRTensorDialect
+    MLIRUBDialect
+    MLIRVectorDialect
+    iree::compiler::Codegen::Dialect::VectorExt::IR::IREEVectorExtDialect
+    iree::compiler::Dialect::LinalgExt::IR
+    iree::compiler::Utils
+  PUBLIC
 )
 
 iree_cc_library(

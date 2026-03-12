@@ -16,6 +16,11 @@
 //   - Persistent relay with multiple fires
 //   - Futex-optimized relay path (gated on FUTEX_OPERATIONS capability)
 //   - Lifecycle: unregister while pending, multiple concurrent relays
+//
+// Verification model: relay side effects are verified via epoch queries on the
+// sink notification. The relay CQE is processed synchronously during
+// DrainPending; after DrainPending returns, the sink epoch reflects whether the
+// relay fired. No waiter threads or timing-based synchronization is needed.
 
 #include "iree/async/relay.h"
 
@@ -40,7 +45,6 @@ TEST_P(RelayTest, NotificationToNotification) {
   IREE_ASSERT_OK(iree_async_notification_create(
       proactor_, IREE_ASYNC_NOTIFICATION_FLAG_NONE, &sink_notification));
 
-  // Register the relay first before starting the waiter.
   iree_async_relay_t* relay = nullptr;
   IREE_ASSERT_OK(iree_async_proactor_register_relay(
       proactor_, iree_async_relay_source_from_notification(source_notification),
@@ -49,37 +53,14 @@ TEST_P(RelayTest, NotificationToNotification) {
       &relay));
   ASSERT_NE(relay, nullptr);
 
-  std::atomic<bool> waiter_started{false};
-  std::atomic<bool> waiter_woken{false};
+  uint32_t epoch_before =
+      iree_async_notification_query_epoch(sink_notification);
 
-  // Background thread waits on the sink notification.
-  std::thread waiter([&]() {
-    waiter_started.store(true, std::memory_order_release);
-    bool result = iree_async_notification_wait(sink_notification,
-                                               iree_make_timeout_ms(5000));
-    waiter_woken.store(result, std::memory_order_release);
-  });
-
-  // Wait for waiter to start.
-  while (!waiter_started.load(std::memory_order_acquire)) {
-    iree_thread_yield();
-  }
-  // Give waiter time to enter wait.
-  iree_wait_until(iree_time_now() + iree_make_duration_ms(20));
-
-  // Signal the source notification.
   iree_async_notification_signal(source_notification, 1);
+  DrainPending();
 
-  // Poll until relay fires.
-  iree_time_t deadline = iree_time_now() + iree_make_duration_ms(2000);
-  while (!waiter_woken.load(std::memory_order_acquire) &&
-         iree_time_now() < deadline) {
-    PollOnce();
-  }
-
-  waiter.join();
-
-  EXPECT_TRUE(waiter_woken.load(std::memory_order_acquire));
+  uint32_t epoch_after = iree_async_notification_query_epoch(sink_notification);
+  EXPECT_NE(epoch_before, epoch_after) << "Relay failed to fire sink";
 
   iree_async_notification_release(source_notification);
   iree_async_notification_release(sink_notification);
@@ -104,44 +85,22 @@ TEST_P(RelayTest, PersistentNotificationRelay) {
   ASSERT_NE(relay, nullptr);
 
   // Fire multiple times to exercise the persistent re-arm path.
+  // Each iteration: the relay re-arms during CQE processing (submitting a new
+  // FUTEX_WAIT/POLL_ADD SQE), so the next signal produces a fresh CQE.
   for (int i = 0; i < 3; ++i) {
-    std::atomic<bool> waiter_started{false};
-    std::atomic<bool> waiter_woken{false};
+    uint32_t epoch_before =
+        iree_async_notification_query_epoch(sink_notification);
 
-    // Background thread waits on the sink notification.
-    std::thread waiter([&]() {
-      waiter_started.store(true, std::memory_order_release);
-      bool result = iree_async_notification_wait(sink_notification,
-                                                 iree_make_timeout_ms(5000));
-      waiter_woken.store(result, std::memory_order_release);
-    });
-
-    // Wait for waiter to start.
-    while (!waiter_started.load(std::memory_order_acquire)) {
-      iree_thread_yield();
-    }
-    iree_wait_until(iree_time_now() + iree_make_duration_ms(20));
-
-    // Signal the source notification.
     iree_async_notification_signal(source_notification, 1);
+    DrainPending();
 
-    // Poll until relay fires.
-    iree_time_t deadline = iree_time_now() + iree_make_duration_ms(2000);
-    while (!waiter_woken.load(std::memory_order_acquire) &&
-           iree_time_now() < deadline) {
-      PollOnce();
-    }
-
-    waiter.join();
-
-    EXPECT_TRUE(waiter_woken.load(std::memory_order_acquire))
-        << "Relay failed on iteration " << i;
+    uint32_t epoch_after =
+        iree_async_notification_query_epoch(sink_notification);
+    EXPECT_NE(epoch_before, epoch_after)
+        << "Relay failed to fire on iteration " << i;
   }
 
-  // Explicitly unregister persistent relay.
   iree_async_proactor_unregister_relay(proactor_, relay);
-
-  // Drain pending operations.
   DrainPending();
 
   iree_async_notification_release(source_notification);
@@ -166,19 +125,15 @@ TEST_P(RelayTest, UnregisterNotificationWhilePending) {
       &relay));
   ASSERT_NE(relay, nullptr);
 
-  // Unregister before any signal.
+  // Unregister cancels the relay's pending SQE and processes the cancel CQE.
   iree_async_proactor_unregister_relay(proactor_, relay);
   DrainPending();
 
-  // Signal after unregister — sink should NOT fire.
+  // Signal after unregister — no relay SQE is watching, so no CQE is produced.
   uint32_t sink_epoch_before =
       iree_async_notification_query_epoch(sink_notification);
   iree_async_notification_signal(source_notification, 1);
-
-  // Poll a few cycles to give any stale relay a chance to fire.
-  for (int i = 0; i < 5; ++i) {
-    PollOnce();
-  }
+  DrainPending();
 
   uint32_t sink_epoch_after =
       iree_async_notification_query_epoch(sink_notification);
@@ -211,30 +166,14 @@ TEST_P(RelayTest, MultipleNotificationRelays) {
     ASSERT_NE(relays[i], nullptr);
   }
 
-  // Capture epochs before signaling.
   uint32_t epochs_before[kNumRelays];
   for (int i = 0; i < kNumRelays; ++i) {
     epochs_before[i] =
         iree_async_notification_query_epoch(sink_notifications[i]);
   }
 
-  // Signal the source once.
   iree_async_notification_signal(source_notification, 1);
-
-  // Poll until all sinks see epoch advancement.
-  iree_time_t deadline = iree_time_now() + iree_make_duration_ms(2000);
-  bool all_fired = false;
-  while (!all_fired && iree_time_now() < deadline) {
-    PollOnce();
-    all_fired = true;
-    for (int i = 0; i < kNumRelays; ++i) {
-      if (iree_async_notification_query_epoch(sink_notifications[i]) ==
-          epochs_before[i]) {
-        all_fired = false;
-        break;
-      }
-    }
-  }
+  DrainPending();
 
   for (int i = 0; i < kNumRelays; ++i) {
     uint32_t epoch_after =
@@ -253,7 +192,6 @@ TEST_P(RelayTest, MultipleNotificationRelays) {
 // Notification-to-notification relay using futex mode (when available).
 // This exercises the futex re-arm logic in the relay CQE handler.
 TEST_P(RelayTest, NotificationToNotificationFutexMode) {
-  // Skip if futex operations are not available.
   if (!iree_any_bit_set(capabilities_,
                         IREE_ASYNC_PROACTOR_CAPABILITY_FUTEX_OPERATIONS)) {
     GTEST_SKIP() << "backend lacks futex operations capability";
@@ -267,7 +205,6 @@ TEST_P(RelayTest, NotificationToNotificationFutexMode) {
   IREE_ASSERT_OK(iree_async_notification_create(
       proactor_, IREE_ASYNC_NOTIFICATION_FLAG_NONE, &sink_notification));
 
-  // Register a persistent relay so we test the futex re-arm path.
   iree_async_relay_t* relay = nullptr;
   IREE_ASSERT_OK(iree_async_proactor_register_relay(
       proactor_, iree_async_relay_source_from_notification(source_notification),
@@ -276,48 +213,77 @@ TEST_P(RelayTest, NotificationToNotificationFutexMode) {
       &relay));
   ASSERT_NE(relay, nullptr);
 
-  // Fire multiple times to exercise the futex re-arm logic.
   for (int i = 0; i < 3; ++i) {
-    std::atomic<bool> waiter_started{false};
-    std::atomic<bool> waiter_woken{false};
+    uint32_t epoch_before =
+        iree_async_notification_query_epoch(sink_notification);
 
-    // Background thread waits on the sink notification.
-    std::thread waiter([&]() {
-      waiter_started.store(true, std::memory_order_release);
-      bool result = iree_async_notification_wait(sink_notification,
-                                                 iree_make_timeout_ms(5000));
-      waiter_woken.store(result, std::memory_order_release);
-    });
-
-    // Wait for waiter to start.
-    while (!waiter_started.load(std::memory_order_acquire)) {
-      iree_thread_yield();
-    }
-    // Give waiter time to enter wait.
-    iree_wait_until(iree_time_now() + iree_make_duration_ms(20));
-
-    // Signal the source notification.
     iree_async_notification_signal(source_notification, 1);
+    DrainPending();
 
-    // Poll until relay fires.
-    iree_time_t deadline = iree_time_now() + iree_make_duration_ms(2000);
-    while (!waiter_woken.load(std::memory_order_acquire) &&
-           iree_time_now() < deadline) {
-      PollOnce();
-    }
-
-    waiter.join();
-
-    EXPECT_TRUE(waiter_woken.load(std::memory_order_acquire))
+    uint32_t epoch_after =
+        iree_async_notification_query_epoch(sink_notification);
+    EXPECT_NE(epoch_before, epoch_after)
         << "Futex relay failed on iteration " << i;
   }
 
-  // Explicitly unregister persistent relay.
   iree_async_proactor_unregister_relay(proactor_, relay);
-
-  // Drain pending operations.
   DrainPending();
 
+  iree_async_notification_release(source_notification);
+  iree_async_notification_release(sink_notification);
+}
+
+// Relay signal wakes a cross-thread waiter via epoch observation.
+// Exercises cross-thread atomic acquire/release on the sink notification's
+// epoch, providing TSAN coverage of the relay signal → waiter wake path.
+// Uses iree_notification_t as a gate to avoid the three-actor race inherent in
+// calling iree_async_notification_wait directly (where the relay can fire
+// before the waiter captures its baseline epoch).
+TEST_P(RelayTest, NotificationRelayWakesCrossThread) {
+  iree_async_notification_t* source_notification = nullptr;
+  IREE_ASSERT_OK(iree_async_notification_create(
+      proactor_, IREE_ASYNC_NOTIFICATION_FLAG_NONE, &source_notification));
+
+  iree_async_notification_t* sink_notification = nullptr;
+  IREE_ASSERT_OK(iree_async_notification_create(
+      proactor_, IREE_ASYNC_NOTIFICATION_FLAG_NONE, &sink_notification));
+
+  iree_async_relay_t* relay = nullptr;
+  IREE_ASSERT_OK(iree_async_proactor_register_relay(
+      proactor_, iree_async_relay_source_from_notification(source_notification),
+      iree_async_relay_sink_signal_notification(sink_notification, 1),
+      IREE_ASYNC_RELAY_FLAG_NONE, iree_async_relay_error_callback_none(),
+      &relay));
+  ASSERT_NE(relay, nullptr);
+
+  // Capture baseline epoch BEFORE starting the waiter thread.
+  iree_notification_t gate;
+  iree_notification_initialize(&gate);
+  EpochWaitContext wait_context = {
+      sink_notification,
+      iree_async_notification_query_epoch(sink_notification)};
+
+  std::atomic<bool> waiter_woken{false};
+  std::thread waiter([&]() {
+    bool result = iree_notification_await(&gate, epoch_advanced, &wait_context,
+                                          iree_make_timeout_ms(5000));
+    waiter_woken.store(result, std::memory_order_release);
+  });
+
+  // Signal source and drain — relay fires, bumping sink epoch.
+  iree_async_notification_signal(source_notification, 1);
+  DrainPending();
+
+  // Wake the waiter. If the waiter already saw the epoch change (fast path),
+  // this post is harmless. If the waiter is blocked in commit_wait, this
+  // wakes it and the predicate confirms the epoch change.
+  iree_notification_post(&gate, IREE_ALL_WAITERS);
+
+  waiter.join();
+  EXPECT_TRUE(waiter_woken.load(std::memory_order_acquire))
+      << "Waiter should have observed relay-driven epoch change";
+
+  iree_notification_deinitialize(&gate);
   iree_async_notification_release(source_notification);
   iree_async_notification_release(sink_notification);
 }

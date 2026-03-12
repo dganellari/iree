@@ -1,26 +1,5 @@
 // RUN: iree-opt --canonicalize --split-input-file %s | FileCheck %s
 
-func.func @pack_canonicalize(%arg0 : tensor<?x?xi32>,
-    %arg1 : tensor<1x2x3x3xi32>) -> tensor<1x?x3x3xi32> {
-  %c0_i32 = arith.constant 0 : i32
-  %0 = tensor.cast %arg1 : tensor<1x2x3x3xi32> to tensor<1x?x3x3xi32>
-  %1 = iree_linalg_ext.pack %arg0 padding_value(%c0_i32 : i32)
-      inner_dims_pos = [0, 1] inner_tiles = [3, 3] into %0
-      : (tensor<?x?xi32> tensor<1x?x3x3xi32>) -> tensor<1x?x3x3xi32>
-  return %1 : tensor<1x?x3x3xi32>
-}
-// CHECK-LABEL: func.func @pack_canonicalize
-//  CHECK-SAME:     %[[ARG0:.+]]: tensor<?x?xi32>
-//  CHECK-SAME:     %[[ARG1:.+]]: tensor<1x2x3x3xi32>
-//       CHECK:   %[[PAD_VALUE:.+]] = arith.constant 0 : i32
-//       CHECK:   %[[PACK:.+]] = iree_linalg_ext.pack %[[ARG0]]
-//  CHECK-SAME:       padding_value(%[[PAD_VALUE]] : i32)
-//  CHECK-SAME:       into %[[ARG1]]
-//       CHECK:   %[[CAST:.+]] = tensor.cast %[[PACK]]
-//       CHECK:   return %[[CAST]]
-
-// -----
-
 func.func @sort_drop_unused_results(%arg0 : tensor<?x10xf32>,
     %arg1 : tensor<?x10xi64>) -> tensor<?x10xf32> {
   %0:2 = iree_linalg_ext.sort dimension(1) outs(%arg0, %arg1: tensor<?x10xf32>,
@@ -216,57 +195,57 @@ func.func public @staticize_online_attention_from_cast(%arg0: tensor<?x4096x16xf
 
 // -----
 
-func.func public @convert_identity_map_scatter_into_copy(
+func.func public @convert_identity_map_store_into_copy(
     %arg0: tensor<?x?xf32>, %arg1: tensor<?x?xf32>
 ) -> tensor<?x?xf32> {
   %true = arith.constant true
-  %map_scatter = iree_linalg_ext.map_scatter %arg0 into %arg1 {
+  %map_store = iree_linalg_ext.map_store %arg0 into %arg1 {
   ^bb0(%arg2: index, %arg3: index):
     iree_linalg_ext.yield %arg2, %arg3, %true : index, index, i1
   } : tensor<?x?xf32> into tensor<?x?xf32> -> tensor<?x?xf32>
-  return %map_scatter : tensor<?x?xf32>
+  return %map_store : tensor<?x?xf32>
 }
-//CHECK-LABEL: func public @convert_identity_map_scatter_into_copy(
+//CHECK-LABEL: func public @convert_identity_map_store_into_copy(
 // CHECK-SAME:     %[[ARG0:[a-zA-Z0-9]+]]: tensor<?x?xf32>
 // CHECK-SAME:     %[[ARG1:[a-zA-Z0-9]+]]: tensor<?x?xf32>
-//  CHECK-NOT:   iree_linalg_ext.map_scatter
+//  CHECK-NOT:   iree_linalg_ext.map_store
 //      CHECK:   %[[COPY:.+]] = linalg.copy ins(%[[ARG0]]{{.*}} outs(%[[ARG1]]
 //      CHECK:   return %[[COPY]]
 
 // -----
 
-func.func public @convert_identity_map_gather_into_copy(
+func.func public @convert_identity_map_load_into_copy(
     %arg0: tensor<16x32xf32>, %arg1: tensor<16x32xf32>
 ) -> tensor<16x32xf32> {
   %cst = arith.constant 0.0 : f32
-  %map_gather = iree_linalg_ext.map_gather %arg0 into %arg1 {
+  %map_load = iree_linalg_ext.map_load %arg0 into %arg1 {
   ^bb0(%arg2: index, %arg3: index):
     iree_linalg_ext.yield %arg2, %arg3, %cst : index, index, f32
   } : tensor<16x32xf32> into tensor<16x32xf32> -> tensor<16x32xf32>
-  return %map_gather : tensor<16x32xf32>
+  return %map_load : tensor<16x32xf32>
 }
-//CHECK-LABEL: func public @convert_identity_map_gather_into_copy(
+//CHECK-LABEL: func public @convert_identity_map_load_into_copy(
 // CHECK-SAME:     %[[ARG0:[a-zA-Z0-9]+]]: tensor<16x32xf32>
 // CHECK-SAME:     %[[ARG1:[a-zA-Z0-9]+]]: tensor<16x32xf32>
-//  CHECK-NOT:   iree_linalg_ext.map_gather
+//  CHECK-NOT:   iree_linalg_ext.map_load
 //      CHECK:   %[[COPY:.+]] = linalg.copy ins(%[[ARG0]]{{.*}} outs(%[[ARG1]]
 //      CHECK:   return %[[COPY]]
 
 // -----
 
-// Verify that identity map_gather with dynamic shapes is not converted to copy.
-func.func public @no_convert_dynamic_identity_map_gather_into_copy(
+// Verify that identity map_load with dynamic shapes is not converted to copy.
+func.func public @no_convert_dynamic_identity_map_load_into_copy(
     %arg0: tensor<?x?xf32>, %arg1: tensor<?x?xf32>
 ) -> tensor<?x?xf32> {
   %cst = arith.constant 0.0 : f32
-  %map_gather = iree_linalg_ext.map_gather %arg0 into %arg1 {
+  %map_load = iree_linalg_ext.map_load %arg0 into %arg1 {
   ^bb0(%arg2: index, %arg3: index):
     iree_linalg_ext.yield %arg2, %arg3, %cst : index, index, f32
   } : tensor<?x?xf32> into tensor<?x?xf32> -> tensor<?x?xf32>
-  return %map_gather : tensor<?x?xf32>
+  return %map_load : tensor<?x?xf32>
 }
-//CHECK-LABEL: func public @no_convert_dynamic_identity_map_gather_into_copy(
+//CHECK-LABEL: func public @no_convert_dynamic_identity_map_load_into_copy(
 // CHECK-SAME:     %[[ARG0:[a-zA-Z0-9]+]]: tensor<?x?xf32>
 // CHECK-SAME:     %[[ARG1:[a-zA-Z0-9]+]]: tensor<?x?xf32>
-//      CHECK:   iree_linalg_ext.map_gather
+//      CHECK:   iree_linalg_ext.map_load
 //  CHECK-NOT:   linalg.copy

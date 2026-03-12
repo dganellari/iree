@@ -489,7 +489,7 @@ static void reduceDistributionWorkgroups(
     int64_t newSize = std::min(currSize * 2, workload[index]);
     int64_t vectorSize = vectorSizeHints ? vectorSizeHints.value()[index] : 0;
 
-    // Chech if it's the ideal size with vector size hint. And skip if the new
+    // Check if it's the ideal size with vector size hint. And skip if the new
     // size will break the ideal size.
     if (vectorSize > 1 &&
         (currSize % vectorSize == 0 && workload[index] % currSize == 0) &&
@@ -519,7 +519,7 @@ static void reduceDistributionWorkgroups(
     int64_t nwg = llvm::divideCeil(workload[i], distributedTileSizes[i]);
     int64_t newSize = llvm::divideCeil(workload[i], nwg);
 
-    // Chech if it's the ideal size with vector size hint. And skip if the new
+    // Check if it's the ideal size with vector size hint. And skip if the new
     // size will break the ideal size.
     int64_t vectorSize = vectorSizeHints ? vectorSizeHints.value()[i] : 0;
     if (vectorSize > 1 &&
@@ -810,7 +810,7 @@ static void limitVectorTileSizes(SmallVectorImpl<int64_t> &vecTileSizes,
 }
 
 // Clamps in-place `vecTileSizes`, ensuring that the resulting vector tile sizes
-// for each opearand of `op` satisfy two requirements:
+// for each operand of `op` satisfy two requirements:
 // 1. No resulting operand tile size exceeds `eachOperandMaxTileBits`.
 // 2. The sum of all resulting operand tile size does not exceed
 // `allOperandsMaxTileBits`.
@@ -1494,7 +1494,7 @@ getDefaultMatmulVectorSizes(linalg::LinalgOp op, int64_t vectorSize,
   if (targetAttr && isRISCV(targetAttr.getConfiguration())) {
     // RISC-V natively supports scalar x vector operations so we don't have to
     // vectorize dimension k. Vectorizing dimension k results in a vector load
-    // and a sequence of vrgather ops to implemement the broadcast explicitly.
+    // and a sequence of vrgather ops to implement the broadcast explicitly.
     // We should tile and/or unroll that dimension without vectorization, which
     // is not possible right now.
     sizes.append({8, 32, 1});
@@ -1609,7 +1609,7 @@ getMatmulRISCVVectorSizes(mlir::FunctionOpInterface entryPointFn,
     return;
   }
 
-  // nativeVectorSize is cacluated with VLEN and LMUL=2.
+  // nativeVectorSize is calculated with VLEN and LMUL=2.
   int64_t nativeVectorSize = getNativeVectorSizeInBytes(entryPointFn);
   int64_t elementSize;
   if (elementType->isF16()) {
@@ -2402,13 +2402,18 @@ static LogicalResult setRootConfig(mlir::FunctionOpInterface entryPointFn,
     vecTileSizeBounds[i] = distTileSizes[i] ? distTileSizes[i] : ubs[i];
   }
 
+  // K1 dimensions (head_dim) are typically small. Per AttentionOpDetail docs
+  // (IndexingUtils.h), K1 is generally 64 or 128. When K1 is static and within
+  // this typical range, we leave it untiled. However, for dynamic K1 or
+  // unusually large K1, we must tile to avoid unbounded allocations.
+  constexpr int64_t kTypicalK1Threshold = 128;
   SmallVector<int64_t> vecTileSizes(vecTileSizeBounds.size(), 1);
-  // Due to the way attention works, K1 dimensions cannot be tiled. Mark k1
-  // reduction dimensions not to distribute.
   for (int i : opInfo.getK1Dims()) {
-    vecTileSizes[i] = 0;
+    int64_t k1Size = ubs[i];
+    if (ShapedType::isStatic(k1Size) && k1Size <= kTypicalK1Threshold) {
+      vecTileSizes[i] = 0;
+    }
   }
-
   for (auto i : llvm::seq<int64_t>(0, vecTileSizeBounds.size())) {
     if (vecTileSizes[i] == 0) {
       continue;
@@ -3792,7 +3797,14 @@ void MultiLoweringConfigGenerator::setNewTilingConfigs() {
         //   level is `VectorReductionTiles`, skip it.
         if ((iterType == utils::IteratorType::reduction) ^
             (level == IREE::CPU::TilingLevel::VectorReductionTiles)) {
-          continue;
+          // Producer ops are fused during reduction tiling, so their
+          // parallel dims that correspond to root reduction dims need the
+          // reduction tile sizes in their config.
+          if (!(isProducerOfRootOp(op, rootOperation) &&
+                level == IREE::CPU::TilingLevel::VectorReductionTiles &&
+                iterType == utils::IteratorType::parallel)) {
+            continue;
+          }
         }
         tileSizes[pos] = globalTileSizes[level][globalDimIdx];
         scalableFlags[pos] = globalScalableTileFlags[level][globalDimIdx];
@@ -3964,9 +3976,10 @@ adjustTileSizesForRootUnPackOp(mlir::FunctionOpInterface entryPointFn,
     }
   }
 
-  auto tInfo = getTranslationInfo(entryPointFn);
-  auto pipeline = tInfo.getPassPipeline().getValue();
-  auto pipelineConfig = tInfo.getConfiguration();
+  IREE::Codegen::TranslationInfoAttr tInfo = getTranslationInfo(entryPointFn);
+  DispatchLoweringPassPipeline pipeline =
+      tInfo.getDispatchLoweringPassPipeline();
+  DictionaryAttr pipelineConfig = tInfo.getConfiguration();
   if (isOptEnabled(entryPointFn, getEnableLoopPeelingStr())) {
     // See #16406
     LDBG() << "unpack fusion does not work with peeling, falling back to "
@@ -4088,7 +4101,7 @@ lowerUsingDefaultPipeline(mlir::FunctionOpInterface entryPointFn) {
 ///   - Ops inside a `CustomOp` that already have a lowering config.
 ///   - Ops with no loops (e.g., a `linalg.generic` with a scalar element type.
 ///   - `linalg.pack` ops whose producer is a `tensor.collapse_shape`,
-///     as they will be lowered together into a `map_scatter` later in the
+///     as they will be lowered together into a `map_store` later in the
 ///     pipeline.
 ///   - `linalg.pack` ops whose producer is a `linalg.unpack`. It is hard to
 ///     propagate lowering configs because the tile size is scaled with
@@ -4153,9 +4166,10 @@ setTranslationInfoAndRootConfig(mlir::FunctionOpInterface entryPointFn,
     return failure();
   }
 
-  // The transform dialect codegen has differnet logics and codegen flow.
+  // The transform dialect codegen has different logics and codegen flow.
   // Ignore the tile sizes adjustment.
-  auto pipeline = getTranslationInfo(entryPointFn).getPassPipeline().getValue();
+  DispatchLoweringPassPipeline pipeline =
+      getTranslationInfo(entryPointFn).getDispatchLoweringPassPipeline();
   if (pipeline != DispatchLoweringPassPipeline::TransformDialectCodegen) {
     if (failed(adjustTileSizesForRootUnPackOp(entryPointFn, rootOperation))) {
       return failure();

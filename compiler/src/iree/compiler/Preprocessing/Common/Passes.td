@@ -56,7 +56,6 @@ def ConvertConv2DToImg2ColPass :
   ];
 }
 
-
 def ConvertConvFilterToChannelsLastPass:
     Pass<"iree-preprocessing-convert-conv-filter-to-channels-last", ""> {
   let summary = "Convert linalg convolutions filter from hwcf to channel last layout.";

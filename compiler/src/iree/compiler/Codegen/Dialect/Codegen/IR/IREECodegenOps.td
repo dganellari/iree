@@ -22,6 +22,7 @@ include "mlir/Interfaces/TilingInterface.td"
 include "mlir/Interfaces/VectorInterfaces.td"
 include "mlir/Interfaces/ViewLikeInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
+include "mlir/Dialect/SMT/IR/SMTTypes.td"
 
 def TensorTypeAttr : TypeAttrBase<"::mlir::TensorType", "Tensor type attribute">;
 
@@ -365,7 +366,7 @@ def IREECodegen_InnerTiledOp : Op<IREECodegen_Dialect, "inner_tiled", [
 
     Note that different `kind` attributes may adopt different conventions as to
     the intrinsic vector tile formats. Some may use only flattened 1-D vectors,
-    and it may be necessary to use `opaque = true` to accomodate them. Others
+    and it may be necessary to use `opaque = true` to accommodate them. Others
     may use higher-rank vectors with shapes reflecting semantics, allowing to
     use `opaque = false`, which is preferable when possible at all thanks to the
     stricter semantics. However, that is not only a function of the `kind`
@@ -418,7 +419,7 @@ def IREECodegen_InnerTiledOp : Op<IREECodegen_Dialect, "inner_tiled", [
 
   let arguments = (ins Variadic<AnyRankedTensorOrVector>:$inputs,
       Variadic<AnyRankedTensorOrVector>:$outputs,
-      TypedArrayAttrBase<AffineMapAttr, "indxing affine maps">:$indexing_maps,
+      TypedArrayAttrBase<AffineMapAttr, "indexing affine maps">:$indexing_maps,
       IteratorTypeArrayAttr:$iterator_types,
       IREECodegen_AnyInnerTileDescAttr:$kind,
       IREECodegen_AnyInnerTiledSemanticscAttr:$semantics,
@@ -613,6 +614,94 @@ def IREECodegen_IndexHintOp : Op<IREECodegen_Dialect, "index_hint", [Pure]> {
   let results = (outs Index:$result);
 
   let assemblyFormat = "$input `(` $hint `)` attr-dict `:` type($input)";
+}
+
+//===----------------------------------------------------------------------===//
+// ConstraintsOp
+//===----------------------------------------------------------------------===//
+
+def IREECodegen_ConstraintsOp :
+    Op<IREECodegen_Dialect, "constraints",
+       [IsolatedFromAbove, SingleBlock, NoTerminator]> {
+  let summary = "SMT constraints for a codegen configuration of root ops.";
+  let description = [{
+    Declares SMT constraints over problem dimensions and configuration
+    knobs for a codegen pipeline, targeting a set of root ops.
+
+    `target`: A `#iree_codegen.root_op<set = N>` attribute identifying
+    which root op set these constraints apply to. All ops marked with
+    the same `#iree_codegen.root_op<set = N>` attribute share the same
+    lowering config. This decouples constraints from SSA values, so ops
+    with zero or multiple results are supported.
+
+    `pipeline`: The codegen pipeline to use. This is a fixed choice,
+    not decided by the solver.
+
+    `knobs`: DictionaryAttr mirroring GPULoweringConfigAttr. Leaves
+    that are `#iree_codegen.int_knob<"name">` attrs name tunable SMT
+    constants (materialized by `iree_codegen.knob` ops in the body).
+    Integer/attr leaves are fixed.
+
+    `problem_dims`: index-typed problem dimensions; corresponding block
+    arguments are !smt.int.
+
+    Does not have any execution semantics and is meant to be used by the
+    tuner or verification passes, and erased before lowering.
+
+    Example:
+    ```mlir
+    // The matmul is marked: {root_op = #iree_codegen.root_op<set = 0>}
+    iree_codegen.constraints target = <set = 0>, pipeline = LLVMGPUVectorDistribute,
+     knobs = {workgroup = [#iree_codegen.int_knob<"wg_m">, #iree_codegen.int_knob<"wg_n">]}
+     dims(%M, %N, %K) {
+    ^bb0(%m: !smt.int, %n: !smt.int, %k: !smt.int):
+      %wg_m = iree_codegen.knob "wg_m" : !smt.int
+      %wg_n = iree_codegen.knob "wg_n" : !smt.int
+    }
+    ```
+  }];
+  let arguments = (ins
+    IREECodegen_RootOpAttr:$target,
+    AnyAttrOf<[DispatchLoweringPassPipelineAttr,
+               IREECodegen_PipelineAttrInterface]>:$pipeline,
+    DictionaryAttr:$knobs,
+    Variadic<Index>:$problem_dims
+  );
+  let regions = (region SizedRegion<1>:$body);
+  let results = (outs);
+  let assemblyFormat = [{
+    `target` `=` $target `,` `pipeline` `=` custom<PipelineAttr>($pipeline) `,`
+    custom<KnobsDictionary>($knobs)
+    `dims` `(` $problem_dims `)` attr-dict-with-keyword
+    $body
+  }];
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// KnobOp
+//===----------------------------------------------------------------------===//
+
+def IREECodegen_KnobOp :
+    Op<IREECodegen_Dialect, "knob", [Pure, HasParent<"ConstraintsOp">]> {
+  let summary = "Declare an SMT constant for a tunable configuration knob.";
+  let description = [{
+    Materializes a named SMT constant (!smt.int) for use in constraint
+    expressions. The name must match an `#iree_codegen.int_knob<"name">`
+    leaf in the enclosing `iree_codegen.constraints` op's `knobs`
+    dictionary.
+
+    In SMT terminology this is a constant (0-ary function), not a variable.
+    The tuner assigns concrete integer values to these constants.
+
+    Example:
+    ```mlir
+    %wg_m = iree_codegen.knob "wg_m" : !smt.int
+    ```
+  }];
+  let arguments = (ins StrAttr:$name);
+  let results = (outs IntType:$result);
+  let assemblyFormat = "$name attr-dict `:` type($result)";
 }
 
 #endif // IREE_CODEGEN_DIALECT_IREECODEGENOPS

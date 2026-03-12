@@ -42,8 +42,13 @@ iree_select_compiler_opts(_RTTI_AND_EXCEPTION_COPTS
     "/GR"
 )
 
+set(_STABLE_ABI_FLAG "")
+if(IREE_ENABLE_PYTHON_STABLE_ABI)
+  set(_STABLE_ABI_FLAG STABLE_ABI)
+endif()
+
 nanobind_add_module(iree_runtime_bindings_python_PyExtRt
-  NB_STATIC LTO FREE_THREADED
+  NB_STATIC LTO FREE_THREADED ${_STABLE_ABI_FLAG}
   "binding.h"
   "initialize_module.cc"
   "invoke.h"
@@ -68,11 +73,11 @@ nanobind_add_module(iree_runtime_bindings_python_PyExtRt
 target_link_libraries(iree_runtime_bindings_python_PyExtRt
   PRIVATE
   iree::base
-  iree::base::internal::flags
+  iree::base::internal::path
+  iree::base::tooling::flags
   iree::hal
   iree::hal::drivers
   iree::hal::utils::allocators
-  iree::base::internal::path
   iree::io::file_handle
   iree::io::formats::irpa
   iree::io::formats::parser_registry
@@ -80,15 +85,13 @@ target_link_libraries(iree_runtime_bindings_python_PyExtRt
   iree::io::parameter_index_provider
   iree::io::parameter_provider
   iree::io::scope_map
-  iree::modules::io::parameters
   iree::modules::hal
+  iree::modules::io::parameters
   iree::schemas::parameter_archive
   iree::tooling::device_util
   iree::tooling::modules
   iree::vm
   iree::vm::bytecode::module
-
-  Python::NumPy
 )
 
 target_compile_options(iree_runtime_bindings_python_PyExtRt

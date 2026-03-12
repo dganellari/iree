@@ -12,7 +12,7 @@
 # with directory names under:
 #   /Library/Frameworks/Python.framework/Versions
 #
-# MacOS convention is to refer to this as major.minor (i.e. "3.9", "3.10").
+# MacOS convention is to refer to this as major.minor (i.e. "3.10", "3.11").
 # Valid packages:
 #   iree-base-runtime
 #   iree-base-compiler
@@ -21,7 +21,9 @@ set -eu -o errtrace
 
 this_dir="$(cd $(dirname $0) && pwd)"
 repo_root="$(cd $this_dir/../../ && pwd)"
-python_versions="${override_python_versions:-3.11}"
+# Python versions to build. 3.12 produces an abi3 wheel (compatible with 3.12+).
+# Per-version builds are used for <3.12 and free-threaded builds.
+python_versions="${override_python_versions:-3.11 3.12}"
 output_dir="${output_dir:-${this_dir}/wheelhouse}"
 packages="${packages:-iree-base-runtime iree-base-compiler}"
 
@@ -73,11 +75,11 @@ function run() {
 
 function build_iree_runtime() {
   export IREE_RUNTIME_BUILD_TRACY=ON
-  python3 -m pip wheel -v -w $output_dir $repo_root/runtime/
+  python3 -m pip wheel --no-deps -v -w $output_dir $repo_root/runtime/
 }
 
 function build_iree_compiler() {
-  python3 -m pip wheel -v -w $output_dir $repo_root/compiler/
+  python3 -m pip wheel --no-deps -v -w $output_dir $repo_root/compiler/
 }
 
 function clean_wheels() {

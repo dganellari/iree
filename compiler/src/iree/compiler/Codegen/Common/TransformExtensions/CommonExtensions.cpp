@@ -15,6 +15,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUOps.h"
 #include "iree/compiler/Codegen/Dialect/GPU/Transforms/Transforms.h"
+#include "iree/compiler/Codegen/Dialect/VectorExt/Transforms/DistributionPatterns.h"
 #include "iree/compiler/Codegen/Interfaces/BufferizationInterfaces.h"
 #include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
@@ -730,7 +731,7 @@ void transform_dialect::IREEApplyLoopIndependentCodeMotionOp::getEffects(
 
 // Important note: this transform is load-bearing and is the glue between
 // different dialects that want to operate on tensors.
-// Originaly, it used to just call `addIREEComprehensiveBufferizePasses` but
+// Originally, it used to just call `addIREEComprehensiveBufferizePasses` but
 // this introduces a lot of complexity in the registration process due to the
 // use of nested pass pipelines, to a point that it is a major endeavor to
 // connect a new dialect.
@@ -814,7 +815,7 @@ static LogicalResult gpuComprehensiveBufferizeCopyFn(OpBuilder &builder,
                                                      Location loc, Value from,
                                                      Value to) {
   // Insert barriers for copies from and to shared memory. We use
-  // workgroup-scope barriers here because we do not currenly produce code that
+  // workgroup-scope barriers here because we do not currently produce code that
   // destructively overwrites global memory or uses it as a communication
   // mechanism, thus eliminating the need for us to force glomal reads/writes to
   // conclude at the barrier. This produces performance improvements on backends
@@ -1072,15 +1073,16 @@ transform_dialect::ShareForallOperandsOp::applyToOne(
 // TestGpuVectorDistribution
 //===----------------------------------------------------------------------===//
 
-class TestVectorLayoutOptions : public VectorLayoutOptions {
+class TestVectorLayoutOptions : public IREE::VectorExt::VectorLayoutOptions {
 public:
   TestVectorLayoutOptions(Operation *root)
       : VectorLayoutOptions(root, /*fullConversion=*/false) {}
 
-  VectorLayoutInterface getDefaultLayout(VectorType type) const override {
+  IREE::VectorExt::VectorLayoutInterface
+  getDefaultLayout(VectorType type) const override {
     // We only allow a default layout for 0-d vectors for now.
     if (type.getRank() > 0) {
-      return VectorLayoutInterface();
+      return IREE::VectorExt::VectorLayoutInterface();
     }
     ArrayRef<int64_t> empty = {};
     return IREE::VectorExt::NestedLayoutAttr::get(
@@ -1108,9 +1110,8 @@ transform_dialect::TestGpuVectorDistribution::applyToOne(
   ArrayRef<int64_t> workgroupSize = getWorkgroupSize();
 
   populateGPUDistributionPatterns(patterns);
-  populateGPUDistributeNestedLayoutAttrPatterns(patterns, laneId, subgroupSize,
-                                                workgroupSize);
-  populateGPUDistributeNestedLayoutContractAMDGPUPatterns(patterns);
+  IREE::VectorExt::populateNestedLayoutDistributionPatterns(
+      patterns, laneId, subgroupSize, workgroupSize);
   if (failed(distributeVectorOps(target, patterns, options))) {
     return emitDefaultDefiniteFailure(target);
   }

@@ -41,7 +41,7 @@ def TopkSplitReductionPass:
   let summary = "Topk split reduction pass.";
   let description = [{
     Produces a "map-reduce" style of parallelizing a Topk Op. The op is split
-    into two, on containing reducitons in parallel and the other contianing the
+    into two, on containing reducitons in parallel and the other containing the
     combination of the parallel reductions into a final result.
   }];
   let options = [
@@ -72,10 +72,10 @@ def DecomposeIm2colPass :
   ];
 }
 
-def DecomposeMapScatterPass :
-    InterfacePass<"iree-linalg-ext-decompose-map-scatter", "mlir::FunctionOpInterface"> {
+def DecomposeMapStorePass :
+    InterfacePass<"iree-linalg-ext-decompose-map-store", "mlir::FunctionOpInterface"> {
   let summary =
-      "Decomposes vectorized map_scatter ops into vector ops";
+      "Decomposes vectorized map_store ops into vector ops";
   let dependentDialects = [
     "::mlir::scf::SCFDialect",
     "::mlir::tensor::TensorDialect",
@@ -85,7 +85,7 @@ def DecomposeMapScatterPass :
   let options = [
     Option<"testPreprocessingPatterns", "test-preprocessing-patterns", "bool",
            /*default=*/"false",
-           "Test only map_scatter decomposition preprocessing patterns.">,
+           "Test only map_store decomposition preprocessing patterns.">,
   ];
 }
 
@@ -144,15 +144,6 @@ def FoldUnitExtentDimsPass :
 def TestReshapeFusionPass :
     Pass<"iree-linalg-ext-test-reshape-fusion", ""> {
   let summary = "Test reshape fusion patterns";
-}
-
-def VectorizeIREELinalgExtOpsPass :
-    InterfacePass<"iree-linalg-ext-vectorize-ops", "mlir::FunctionOpInterface"> {
-  let summary = "Convert linalg_ext ops into their vector form.";
-  let dependentDialects = [
-    "::mlir::vector::VectorDialect",
-    "::mlir::arith::ArithDialect"
-  ];
 }
 
 #endif  // IREE_DIALECT_LINALGEXT_PASSES

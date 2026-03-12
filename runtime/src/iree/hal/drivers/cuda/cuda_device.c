@@ -73,7 +73,7 @@ typedef struct iree_hal_cuda_device_t {
   // Timepoint pools, shared by various semaphores.
   iree_hal_cuda_timepoint_pool_t* timepoint_pool;
 
-  // A queue to order device workloads and relase to the GPU when constraints
+  // A queue to order device workloads and release to the GPU when constraints
   // are met. It buffers submissions and allocations internally before they
   // are ready. This queue couples with HAL semaphores backed by iree_event_t
   // and CUevent objects.
@@ -86,6 +86,8 @@ typedef struct iree_hal_cuda_device_t {
 
   // Optional provider used for creating/configuring collective channels.
   iree_hal_channel_provider_t* channel_provider;
+
+  iree_hal_device_topology_info_t topology_info;
 } iree_hal_cuda_device_t;
 
 static const iree_hal_device_vtable_t iree_hal_cuda_device_vtable;
@@ -552,7 +554,7 @@ iree_status_t iree_hal_cuda_device_create(
         driver, identifier, params, device, dispatch_stream, context,
         cuda_symbols, nccl_symbols, host_allocator, out_device);
   } else {
-    // Release resources we have accquired thus far.
+    // Release resources we have acquired thus far.
     if (dispatch_stream) cuda_symbols->cuStreamDestroy(dispatch_stream);
     if (context) cuda_symbols->cuDevicePrimaryCtxRelease(device);
   }
@@ -584,7 +586,7 @@ iree_status_t iree_hal_cuda_device_create(
     cuda_device->device_event_pool = device_event_pool;
     cuda_device->timepoint_pool = timepoint_pool;
   } else {
-    // Release resources we have accquired after HAL device creation.
+    // Release resources we have acquired after HAL device creation.
     if (timepoint_pool) iree_hal_cuda_timepoint_pool_free(timepoint_pool);
     if (device_event_pool) iree_hal_cuda_event_pool_release(device_event_pool);
     if (host_event_pool) iree_event_pool_free(host_event_pool);
@@ -743,6 +745,33 @@ static iree_status_t iree_hal_cuda_device_query_i64(
       (int)category.size, category.data, (int)key.size, key.data);
 }
 
+static iree_status_t iree_hal_cuda_device_query_capabilities(
+    iree_hal_device_t* base_device,
+    iree_hal_device_capabilities_t* out_capabilities) {
+  memset(out_capabilities, 0, sizeof(*out_capabilities));
+  return iree_ok_status();
+}
+
+static const iree_hal_device_topology_info_t*
+iree_hal_cuda_device_topology_info(iree_hal_device_t* base_device) {
+  iree_hal_cuda_device_t* device = iree_hal_cuda_device_cast(base_device);
+  return &device->topology_info;
+}
+
+static iree_status_t iree_hal_cuda_device_refine_topology_edge(
+    iree_hal_device_t* src_device, iree_hal_device_t* dst_device,
+    iree_hal_topology_edge_t* edge) {
+  return iree_ok_status();
+}
+
+static iree_status_t iree_hal_cuda_device_assign_topology_info(
+    iree_hal_device_t* base_device,
+    const iree_hal_device_topology_info_t* topology_info) {
+  iree_hal_cuda_device_t* device = iree_hal_cuda_device_cast(base_device);
+  device->topology_info = *topology_info;
+  return iree_ok_status();
+}
+
 static iree_status_t iree_hal_cuda_device_create_channel(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     iree_hal_channel_params_t params, iree_hal_channel_t** out_channel) {
@@ -882,7 +911,7 @@ static iree_status_t iree_hal_cuda_device_create_event(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     iree_hal_event_flags_t flags, iree_hal_event_t** out_event) {
   return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
-                          "event not yet implmeneted");
+                          "event not yet implemented");
 }
 
 static iree_status_t iree_hal_cuda_device_create_executable_cache(
@@ -1119,6 +1148,10 @@ static const iree_hal_device_vtable_t iree_hal_cuda_device_vtable = {
     .replace_channel_provider = iree_hal_cuda_replace_channel_provider,
     .trim = iree_hal_cuda_device_trim,
     .query_i64 = iree_hal_cuda_device_query_i64,
+    .query_capabilities = iree_hal_cuda_device_query_capabilities,
+    .topology_info = iree_hal_cuda_device_topology_info,
+    .refine_topology_edge = iree_hal_cuda_device_refine_topology_edge,
+    .assign_topology_info = iree_hal_cuda_device_assign_topology_info,
     .create_channel = iree_hal_cuda_device_create_channel,
     .create_command_buffer = iree_hal_cuda_device_create_command_buffer,
     .create_event = iree_hal_cuda_device_create_event,

@@ -116,17 +116,15 @@ class Status final {
     if (iree_status_is_ok(status)) {
       return "OK";
     }
-    iree_host_size_t buffer_length = 0;
-    if (IREE_UNLIKELY(!iree_status_format(status, /*buffer_capacity=*/0,
-                                          /*buffer=*/NULL, &buffer_length))) {
-      return "<!>";
-    }
-    std::string result(buffer_length, '\0');
-    if (IREE_UNLIKELY(!iree_status_format(status, result.size() + 1,
-                                          const_cast<char*>(result.data()),
-                                          &buffer_length))) {
-      return "<!>";
-    }
+    std::string result;
+    iree_status_format_to(
+        status,
+        [](iree_string_view_t chunk, void* user_data) -> bool {
+          auto* str = static_cast<std::string*>(user_data);
+          str->append(chunk.data, chunk.size);
+          return true;
+        },
+        &result);
     return result;
   }
 
@@ -306,7 +304,7 @@ using IsStatusOrConversionAmbiguous =
                              std::is_convertible<const StatusOr<U>&&, T>>;
 
 template <typename T, typename U>
-using IsStatusOrConversionAssigmentAmbiguous =
+using IsStatusOrConversionAssignmentAmbiguous =
     status_impl::disjunction<IsStatusOrConversionAmbiguous<T, U>,
                              std::is_assignable<T&, StatusOr<U>&>,
                              std::is_assignable<T&, const StatusOr<U>&>,
@@ -645,7 +643,7 @@ class StatusOr
                     std::is_constructible<T, const U&>,
                     std::is_assignable<T, const U&>,
                     status_impl::negation<
-                        status_impl::IsStatusOrConversionAssigmentAmbiguous<
+                        status_impl::IsStatusOrConversionAssignmentAmbiguous<
                             T, U>>>::value,
                 int> = 0>
   StatusOr& operator=(const StatusOr<U>& other) {
@@ -658,7 +656,7 @@ class StatusOr
                     status_impl::negation<std::is_same<T, U>>,
                     std::is_constructible<T, U&&>, std::is_assignable<T, U&&>,
                     status_impl::negation<
-                        status_impl::IsStatusOrConversionAssigmentAmbiguous<
+                        status_impl::IsStatusOrConversionAssignmentAmbiguous<
                             T, U>>>::value,
                 int> = 0>
   StatusOr& operator=(StatusOr<U>&& other) {

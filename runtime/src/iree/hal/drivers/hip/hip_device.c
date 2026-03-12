@@ -85,6 +85,8 @@ typedef struct iree_hal_hip_device_t {
   // Optional provider used for creating/configuring collective channels.
   iree_hal_channel_provider_t* channel_provider;
 
+  iree_hal_device_topology_info_t topology_info;
+
   iree_hal_allocator_t* device_allocator;
 
   iree_hal_hip_cleanup_thread_t* cleanup_thread;
@@ -453,7 +455,9 @@ static iree_status_t iree_hal_hip_device_enable_peering(
 
     hip_error = symbols->hipDeviceEnablePeerAccess(j, 0);
     if (hip_error == hipErrorPeerAccessAlreadyEnabled) {
-      // Already peered. That's okay.
+      // Already peered. That's okay. Clear the sticky error so it doesn't
+      // affect subsequent HIP calls.
+      symbols->hipGetLastError();
       continue;
     } else if (hip_error != hipSuccess) {
       // Unhandled error, propagate it.
@@ -728,6 +732,33 @@ static iree_status_t iree_hal_hip_device_query_i64(
       (int)category.size, category.data, (int)key.size, key.data);
 }
 
+static iree_status_t iree_hal_hip_device_query_capabilities(
+    iree_hal_device_t* base_device,
+    iree_hal_device_capabilities_t* out_capabilities) {
+  memset(out_capabilities, 0, sizeof(*out_capabilities));
+  return iree_ok_status();
+}
+
+static const iree_hal_device_topology_info_t* iree_hal_hip_device_topology_info(
+    iree_hal_device_t* base_device) {
+  iree_hal_hip_device_t* device = iree_hal_hip_device_cast(base_device);
+  return &device->topology_info;
+}
+
+static iree_status_t iree_hal_hip_device_refine_topology_edge(
+    iree_hal_device_t* src_device, iree_hal_device_t* dst_device,
+    iree_hal_topology_edge_t* edge) {
+  return iree_ok_status();
+}
+
+static iree_status_t iree_hal_hip_device_assign_topology_info(
+    iree_hal_device_t* base_device,
+    const iree_hal_device_topology_info_t* topology_info) {
+  iree_hal_hip_device_t* device = iree_hal_hip_device_cast(base_device);
+  device->topology_info = *topology_info;
+  return iree_ok_status();
+}
+
 static iree_status_t iree_hal_hip_device_create_channel(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     iree_hal_channel_params_t params, iree_hal_channel_t** out_channel) {
@@ -959,7 +990,7 @@ static iree_status_t iree_hal_hip_device_create_event(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     iree_hal_event_flags_t flags, iree_hal_event_t** out_event) {
   return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
-                          "event not yet implmeneted");
+                          "event not yet implemented");
 }
 
 static iree_status_t iree_hal_hip_device_import_file(
@@ -1060,6 +1091,7 @@ static iree_status_t iree_hal_hip_device_prepare_async_alloc(
 
 typedef struct iree_hal_hip_dispatch_completed_data_t {
   iree_hal_resource_t resource;
+  iree_allocator_t host_allocator;
   iree_notification_t notification;
   iree_slim_mutex_t completed_mutex;
   bool completed;
@@ -1071,6 +1103,7 @@ static void iree_hal_hip_dispatch_completed_destroy(
       (iree_hal_hip_dispatch_completed_data_t*)resource;
   iree_slim_mutex_deinitialize(&data->completed_mutex);
   iree_notification_deinitialize(&data->notification);
+  iree_allocator_free(data->host_allocator, data);
 }
 
 static const iree_hal_resource_vtable_t
@@ -1085,11 +1118,11 @@ static iree_status_t iree_hal_hip_dispatch_completed_create(
 
   IREE_RETURN_IF_ERROR(
       iree_allocator_malloc(host_allocator, sizeof(**out), (void**)out));
-
   iree_slim_mutex_initialize(&(*out)->completed_mutex);
   iree_notification_initialize(&(*out)->notification);
   iree_hal_resource_initialize(&iree_hal_hip_dispatch_completed_data_vtable_t,
                                &(*out)->resource);
+  (*out)->host_allocator = host_allocator;
   return iree_ok_status();
 }
 
@@ -1099,6 +1132,11 @@ static bool iree_hal_hip_dispatch_is_completed(
   bool ret = data->completed;
   iree_slim_mutex_unlock(&data->completed_mutex);
   return ret;
+}
+
+static bool iree_hal_hip_dispatch_is_completed_thunk(void* arg) {
+  return iree_hal_hip_dispatch_is_completed(
+      (iree_hal_hip_dispatch_completed_data_t*)arg);
 }
 
 static void iree_hal_hip_set_external_stream_data_completed(
@@ -1111,10 +1149,9 @@ static void iree_hal_hip_set_external_stream_data_completed(
 
 static void iree_hal_hip_wait_for_dispatch(
     iree_hal_hip_dispatch_completed_data_t* data) {
-  iree_notification_await(
-      &data->notification,
-      (iree_condition_fn_t)iree_hal_hip_dispatch_is_completed, data,
-      iree_infinite_timeout());
+  iree_notification_await(&data->notification,
+                          iree_hal_hip_dispatch_is_completed_thunk, data,
+                          iree_infinite_timeout());
 }
 
 typedef struct iree_hal_hip_semaphore_callback_data_t {
@@ -1127,7 +1164,7 @@ typedef struct iree_hal_hip_semaphore_callback_data_t {
   iree_hal_semaphore_list_t signal_semaphore_list;
   iree_slim_mutex_t status_mutex;
   iree_status_t status;
-  // This is null unless we are running with an extenal stream,
+  // This is null unless we are running with an external stream,
   // at which point this is valid.
   iree_hal_hip_dispatch_completed_data_t* external_stream_dispatch_data;
 } iree_hal_hip_semaphore_callback_data_t;
@@ -1174,15 +1211,19 @@ static iree_status_t iree_hal_hip_semaphore_callback_data_initialize(
       wait_semaphore_list.count * sizeof(*wait_semaphore_list.payload_values);
   data->wait_semaphore_list.count = wait_semaphore_list.count;
   data->wait_semaphore_list.semaphores = (iree_hal_semaphore_t**)callback_ptr;
-  memcpy(data->wait_semaphore_list.semaphores, wait_semaphore_list.semaphores,
-         wait_semaphore_list.count * sizeof(*wait_semaphore_list.semaphores));
+  if (wait_semaphore_list.count > 0) {
+    memcpy(data->wait_semaphore_list.semaphores, wait_semaphore_list.semaphores,
+           wait_semaphore_list.count * sizeof(*wait_semaphore_list.semaphores));
+  }
   data->wait_semaphore_list.payload_values =
       (uint64_t*)(callback_ptr + wait_semaphore_list.count *
                                      sizeof(*wait_semaphore_list.semaphores));
-  memcpy(
-      data->wait_semaphore_list.payload_values,
-      wait_semaphore_list.payload_values,
-      wait_semaphore_list.count * sizeof(*wait_semaphore_list.payload_values));
+  if (wait_semaphore_list.count > 0) {
+    memcpy(data->wait_semaphore_list.payload_values,
+           wait_semaphore_list.payload_values,
+           wait_semaphore_list.count *
+               sizeof(*wait_semaphore_list.payload_values));
+  }
   for (iree_host_size_t i = 0; i < wait_semaphore_list.count; ++i) {
     iree_hal_resource_retain(wait_semaphore_list.semaphores[i]);
   }
@@ -1191,16 +1232,21 @@ static iree_status_t iree_hal_hip_semaphore_callback_data_initialize(
   // Copy signal list for later access.
   data->signal_semaphore_list.count = signal_semaphore_list.count;
   data->signal_semaphore_list.semaphores = (iree_hal_semaphore_t**)callback_ptr;
-  memcpy(
-      data->signal_semaphore_list.semaphores, signal_semaphore_list.semaphores,
-      signal_semaphore_list.count * sizeof(*signal_semaphore_list.semaphores));
+  if (signal_semaphore_list.count > 0) {
+    memcpy(data->signal_semaphore_list.semaphores,
+           signal_semaphore_list.semaphores,
+           signal_semaphore_list.count *
+               sizeof(*signal_semaphore_list.semaphores));
+  }
   data->signal_semaphore_list.payload_values =
       (uint64_t*)(callback_ptr + signal_semaphore_list.count *
                                      sizeof(*signal_semaphore_list.semaphores));
-  memcpy(data->signal_semaphore_list.payload_values,
-         signal_semaphore_list.payload_values,
-         signal_semaphore_list.count *
-             sizeof(*signal_semaphore_list.payload_values));
+  if (signal_semaphore_list.count > 0) {
+    memcpy(data->signal_semaphore_list.payload_values,
+           signal_semaphore_list.payload_values,
+           signal_semaphore_list.count *
+               sizeof(*signal_semaphore_list.payload_values));
+  }
   for (iree_host_size_t i = 0; i < signal_semaphore_list.count; ++i) {
     iree_hal_resource_retain(signal_semaphore_list.semaphores[i]);
   }
@@ -1539,10 +1585,10 @@ static iree_status_t iree_hal_hip_device_perform_buffer_operation_now(
     }
   }
   IREE_TRACE_ZONE_END(z3);
-
+  iree_hal_hip_dispatch_completed_data_t* external_stream_dispatch_data = NULL;
   if (device->uses_external_stream) {
-    iree_hal_hip_set_external_stream_data_completed(
-        data->base.external_stream_dispatch_data);
+    external_stream_dispatch_data = data->base.external_stream_dispatch_data;
+    iree_hal_resource_retain(external_stream_dispatch_data);
   }
 
   const iree_hal_hip_dynamic_symbols_t* symbols = device->hip_symbols;
@@ -1560,6 +1606,12 @@ static iree_status_t iree_hal_hip_device_perform_buffer_operation_now(
                               iree_status_clone(status));
     }
     iree_hal_hip_device_destroy_buffer_callback_data(data);
+  }
+
+  if (external_stream_dispatch_data) {
+    iree_hal_hip_set_external_stream_data_completed(
+        external_stream_dispatch_data);
+    iree_hal_resource_release(external_stream_dispatch_data);
   }
 
   IREE_TRACE_ZONE_END(z0);
@@ -2034,6 +2086,11 @@ static iree_status_t iree_hal_hip_device_perform_queue_read_now(
         device, device->devices[device_ordinal].hip_dispatch_stream,
         data->base.wait_semaphore_list, device_ordinal);
   }
+  iree_hal_hip_dispatch_completed_data_t* external_stream_dispatch_data = NULL;
+  if (device->uses_external_stream) {
+    external_stream_dispatch_data = data->base.external_stream_dispatch_data;
+    iree_hal_resource_retain(external_stream_dispatch_data);
+  }
 
   const iree_hal_hip_dynamic_symbols_t* symbols = device->hip_symbols;
   iree_device_size_t amount_left = data->length;
@@ -2125,18 +2182,20 @@ static iree_status_t iree_hal_hip_device_perform_queue_read_now(
     }
   }
 
-  if (device->uses_external_stream) {
-    iree_hal_hip_set_external_stream_data_completed(
-        data->base.external_stream_dispatch_data);
-  }
-
   if (!iree_status_is_ok(status)) {
     for (iree_host_size_t i = 0; i < data->base.signal_semaphore_list.count;
          ++i) {
       iree_hal_semaphore_fail(data->base.signal_semaphore_list.semaphores[i],
                               iree_status_clone(status));
     }
+
     iree_hal_hip_device_destroy_queue_read_callback_data(data);
+  }
+
+  if (external_stream_dispatch_data) {
+    iree_hal_hip_set_external_stream_data_completed(
+        external_stream_dispatch_data);
+    iree_hal_resource_release(external_stream_dispatch_data);
   }
 
   IREE_TRACE_ZONE_END(z0);
@@ -2467,10 +2526,10 @@ static iree_status_t iree_hal_hip_device_execute_now(void* user_data,
   }
 
   IREE_TRACE_ZONE_END(z1);
-
+  iree_hal_hip_dispatch_completed_data_t* external_stream_dispatch_data = NULL;
   if (device->uses_external_stream) {
-    iree_hal_hip_set_external_stream_data_completed(
-        data->base.external_stream_dispatch_data);
+    external_stream_dispatch_data = data->base.external_stream_dispatch_data;
+    iree_hal_resource_retain(external_stream_dispatch_data);
   }
 
   // Store symbols, because the cleanup may trigger off-thread
@@ -2491,6 +2550,12 @@ static iree_status_t iree_hal_hip_device_execute_now(void* user_data,
                               iree_status_clone(status));
     }
     iree_hal_hip_device_destroy_callback_data(data);
+  }
+
+  if (external_stream_dispatch_data) {
+    iree_hal_hip_set_external_stream_data_completed(
+        external_stream_dispatch_data);
+    iree_hal_resource_release(external_stream_dispatch_data);
   }
 
   IREE_TRACE_ZONE_END(z0);
@@ -2562,8 +2627,10 @@ static iree_status_t iree_hal_hip_device_make_callback_data(
                                      sizeof(*callback_data) +
                                      additional_data_for_base);
     callback_data->binding_table.bindings = binding_element_ptr;
-    memcpy(binding_element_ptr, binding_table.bindings,
-           sizeof(*binding_element_ptr) * binding_table.count);
+    if (binding_table.count > 0) {
+      memcpy(binding_element_ptr, binding_table.bindings,
+             sizeof(*binding_element_ptr) * binding_table.count);
+    }
 
     status = iree_hal_resource_set_insert_strided(
         callback_data->resource_set, binding_table.count,
@@ -2692,6 +2759,10 @@ static const iree_hal_device_vtable_t iree_hal_hip_device_vtable = {
     .replace_channel_provider = iree_hal_hip_replace_channel_provider,
     .trim = iree_hal_hip_device_trim,
     .query_i64 = iree_hal_hip_device_query_i64,
+    .query_capabilities = iree_hal_hip_device_query_capabilities,
+    .topology_info = iree_hal_hip_device_topology_info,
+    .refine_topology_edge = iree_hal_hip_device_refine_topology_edge,
+    .assign_topology_info = iree_hal_hip_device_assign_topology_info,
     .create_channel = iree_hal_hip_device_create_channel,
     .create_command_buffer = iree_hal_hip_device_create_command_buffer,
     .create_event = iree_hal_hip_device_create_event,

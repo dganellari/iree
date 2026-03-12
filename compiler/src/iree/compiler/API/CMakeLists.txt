@@ -17,12 +17,14 @@ iree_cc_library(
     IREEDialectsCAPI
     MLIRCAPIAMDGPU
     MLIRCAPIDebug
+    MLIRCAPIExportSMTLIB
     MLIRCAPIGPU
     MLIRCAPIIR
     MLIRCAPIInterfaces
     MLIRCAPILLVM
     MLIRCAPILinalg
     MLIRCAPIPDL
+    MLIRCAPISMT
     MLIRCAPITarget
     MLIRCAPITransformDialect
     MLIRCAPITransformDialectTransforms
@@ -71,28 +73,30 @@ iree_cc_library(
 ################################################################################
 
 set(_EXPORT_OBJECT_LIBS
-  obj.MLIRCAPIAMDGPU
-  obj.IREEDialectsCAPI
-  obj.MLIRCAPIDebug
-  obj.MLIRCAPIIR
-  obj.MLIRCAPIInterfaces
-  obj.MLIRCAPIGPU
-  obj.MLIRCAPILLVM
-  obj.MLIRCAPILinalg
-  obj.MLIRCAPIPDL
-  obj.MLIRCAPITarget
-  obj.MLIRCAPITransforms
-  obj.MLIRCAPITransformDialect
-  obj.MLIRCAPITransformDialectTransforms
   iree_compiler_API_Internal_CompilerDriver.objects
-  iree_compiler_API_Internal_IREECompileToolEntryPoint.objects
   iree_compiler_API_Internal_IREECodegenDialectCAPI.objects
+  iree_compiler_API_Internal_IREECompileToolEntryPoint.objects
   iree_compiler_API_Internal_IREEGPUDialectCAPI.objects
   iree_compiler_API_Internal_IREELinkToolEntryPoint.objects
   iree_compiler_API_Internal_IREEMLIRLSPServerToolEntryPoint.objects
   iree_compiler_API_Internal_IREEOptToolEntryPoint.objects
   iree_compiler_API_Internal_IREEReduceToolEntryPoint.objects
   iree_compiler_API_Internal_LLDToolEntryPoint.objects
+  obj.IREEDialectsCAPI
+  obj.MLIRCAPIAMDGPU
+  obj.MLIRCAPIDebug
+  obj.MLIRCAPIExportSMTLIB
+  obj.MLIRCAPIGPU
+  obj.MLIRCAPIInterfaces
+  obj.MLIRCAPIIR
+  obj.MLIRCAPILinalg
+  obj.MLIRCAPILLVM
+  obj.MLIRCAPIPDL
+  obj.MLIRCAPISMT
+  obj.MLIRCAPITarget
+  obj.MLIRCAPITransformDialect
+  obj.MLIRCAPITransformDialectTransforms
+  obj.MLIRCAPITransforms
 )
 
 if(DEFINED IREE_COMPILER_API_ADDL_EXPORT_OBJECTS)
@@ -168,6 +172,10 @@ iree_cc_library(
   LINKOPTS
     # Linux uses a linker script to version symbols.
     $<$<PLATFORM_ID:Linux>:-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/api_version.ld>
+    # Hide all symbols from static archives (.a) linked into the shared library.
+    # Without this, LLVM/MLIR internal symbols leak through the `global: *`
+    # version script since LLVM is not compiled with -fvisibility=hidden.
+    $<$<PLATFORM_ID:Linux>:LINKER:--exclude-libs,ALL>
   DEPS
     iree::compiler::bindings::c::headers
 )
@@ -190,8 +198,10 @@ target_link_libraries(iree_compiler_API_SharedImpl PRIVATE
   ${_EXPORT_OBJECT_DEPS}
 )
 
-# Link MLIRTargetLLVMIRImport directly since it is not exported as an object library.
+# Link MLIRTargetLLVMIRImport and MLIRExportSMTLIB directly since they are
+# not exported as object libraries.
 target_link_libraries(iree_compiler_API_SharedImpl PRIVATE
+  MLIRExportSMTLIB
   MLIRTargetLLVMIRImport
 )
 

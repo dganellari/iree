@@ -40,6 +40,8 @@ iree_cc_library(
     "detail.h"
     "device.c"
     "device.h"
+    "device_group.c"
+    "device_group.h"
     "driver.c"
     "driver.h"
     "driver_registry.c"
@@ -60,11 +62,16 @@ iree_cc_library(
     "semaphore.h"
     "string_util.c"
     "string_util.h"
+    "topology.c"
+    "topology.h"
+    "topology_builder.c"
+    "topology_builder.h"
   DEPS
     iree::base
     iree::base::internal
     iree::base::internal::path
     iree::base::threading
+    iree::hal::utils::platform_topology
     iree::io::file_handle
   PUBLIC
 )
@@ -78,6 +85,43 @@ iree_cc_test(
     ::hal
     iree::base
     iree::base::internal::span
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_test(
+  NAME
+    topology_test
+  SRCS
+    "topology_test.cc"
+  DEPS
+    ::hal
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_test(
+  NAME
+    topology_builder_test
+  SRCS
+    "topology_builder_test.cc"
+  DEPS
+    ::hal
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_test(
+  NAME
+    device_group_test
+  SRCS
+    "device_group_test.cc"
+  DEPS
+    ::hal
+    iree::base
+    iree::hal::testing::mock_device
     iree::testing::gtest
     iree::testing::gtest_main
 )

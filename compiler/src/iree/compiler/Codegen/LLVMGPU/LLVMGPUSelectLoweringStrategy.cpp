@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/LLVMGPU/KernelConfig.h"
 #include "iree/compiler/Codegen/LLVMGPU/Passes.h"
 #include "mlir/Pass/Pass.h"
@@ -77,7 +78,7 @@ verifyEntryPoint(FunctionOpInterface funcOp,
 void LLVMGPUSelectLoweringStrategyPass::runOnOperation() {
   mlir::ModuleOp moduleOp = getOperation();
   for (auto funcOp : moduleOp.getOps<FunctionOpInterface>()) {
-    if (failed(initGPULaunchConfig(funcOp, gpuOptions.getValue()))) {
+    if (failed(initGPULaunchConfig(funcOp))) {
       return signalPassFailure();
     }
 
@@ -86,6 +87,12 @@ void LLVMGPUSelectLoweringStrategyPass::runOnOperation() {
     if (!translationInfo) {
       // Dont do anything if translation info is not set.
       return;
+    }
+
+    // Custom pipelines via PipelineAttrInterface skip enum-based verification.
+    if (isa<IREE::Codegen::PipelineAttrInterface>(
+            translationInfo.getPassPipeline())) {
+      continue;
     }
 
     // Verify the properties of each entry point based on the target pipeline.

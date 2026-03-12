@@ -10,6 +10,7 @@
 include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUDialect.td"
 include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUInterfaces.td"
 include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.td"
+include "iree/compiler/Codegen/Interfaces/HoistableRegionOpInterface.td"
 include "iree/compiler/Utils/CommonTypeConstraints.td"
 include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
@@ -24,6 +25,7 @@ include "mlir/IR/OpBase.td"
 //===----------------------------------------------------------------------===//
 
 def IREEGPU_BarrierRegionOp : Op<IREEGPU_Dialect, "barrier_region", [
+    DeclareOpInterfaceMethods<HoistableRegionOpInterface>,
     Pure,
     SingleBlockImplicitTerminator<"mlir::iree_compiler::IREE::GPU::YieldOp">
     ]> {
@@ -357,6 +359,29 @@ def IREEGPU_CoalescedGatherDMAOp : Op<IREEGPU_Dialect, "coalesced_gather_dma", [
       return ::llvm::isa<RankedTensorType>(getInit().getType());
     }
   }];
+}
+
+//===----------------------------------------------------------------------===//
+// GlobalSubgroupBarrierOp
+//===----------------------------------------------------------------------===//
+
+def IREEGPU_GlobalSubgroupBarrierOp : Op<IREEGPU_Dialect,
+    "global_subgroup_barrier", []> {
+  let summary = "Synchronization-only barrier across all subgroups.";
+  let description = [{
+    All subgroups in the workgroup must reach any instance of this op before
+    any can proceed past it. Unlike `gpu.barrier`, this op has no memory
+    fence semantics - memory operations can be freely reordered with respect
+    to it. Fences are handled separately.
+
+    This operation operates on a single, global workgroup-wide barrier object
+    that can implement such dynamic join and must not be used if such a barrier
+    isn't available.
+  }];
+
+  let arguments = (ins);
+  let results = (outs);
+  let assemblyFormat = "attr-dict";
 }
 
 #endif // IREE_CODEGEN_DIALECT_IREEGPUOPS

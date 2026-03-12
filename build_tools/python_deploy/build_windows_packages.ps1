@@ -9,7 +9,9 @@
 
 # Configure settings with script parameters.
 param(
-    [array]$python_versions=@("3.11"),
+    # Python versions to build. 3.12 produces an abi3 wheel (compatible with 3.12+).
+    # Per-version builds are used for <3.12 and free-threaded builds.
+    [array]$python_versions=@("3.11", "3.12"),
     [array]$packages=@("iree-base-runtime", "iree-base-compiler"),
     [System.String]$output_dir
 )
@@ -69,14 +71,14 @@ function build_iree_runtime() {
   $env:IREE_HAL_DRIVER_VULKAN = "ON"
   $env:IREE_HAL_DRIVER_HIP = "ON"
   $env:IREE_HAL_DRIVER_CUDA = "ON"
-  & py -${python_version} -m pip wheel -v -w $output_dir $repo_root/runtime/
+  & py -${python_version} -m pip wheel --no-deps -v -w $output_dir $repo_root/runtime/
 }
 
 function build_iree_compiler() {
   param($python_version)
   $env:IREE_TARGET_BACKEND_CUDA = "ON"
   $env:IREE_TARGET_BACKEND_ROCM = "ON"
-  py -${python_version} -m pip wheel -v -w $output_dir $repo_root/compiler/
+  py -${python_version} -m pip wheel --no-deps -v -w $output_dir $repo_root/compiler/
 }
 
 function clean_wheels() {

@@ -13,15 +13,16 @@
 //
 // The portable notification-to-notification relay tests are in relay_test.cc.
 // The POSIX primitive relay tests (eventfd/pipe) are in relay_posix_test.cc.
+//
+// Synchronization model: relay CQEs are processed synchronously during
+// DrainPending. After DrainPending returns, all relay side effects (SetEvent
+// calls, notification epoch increments) are complete.
 
 #if defined(_WIN32)
 
 // clang-format off
 #include <windows.h>
 // clang-format on
-
-#include <atomic>
-#include <thread>
 
 #include "iree/async/cts/util/registry.h"
 #include "iree/async/cts/util/test_base.h"
@@ -42,28 +43,9 @@ class RelayWindowsTest : public CtsTestBase<> {
   }
 
   // Returns true if the event is currently signaled (non-blocking check).
+  // Consumes the event signal for auto-reset events.
   bool IsEventSignaled(HANDLE event) {
     return WaitForSingleObject(event, 0) == WAIT_OBJECT_0;
-  }
-
-  // Waits for the event to become signaled with a timeout.
-  // Polls the proactor between waits to allow relay dispatch.
-  bool WaitEventSignaled(HANDLE event, DWORD timeout_ms) {
-    iree_time_t deadline =
-        iree_time_now() + (iree_duration_t)timeout_ms * 1000000LL;
-    while (iree_time_now() < deadline) {
-      if (IsEventSignaled(event)) return true;
-      // Poll to process relay dispatch.
-      iree_status_t status = iree_async_proactor_poll(
-          proactor_, iree_make_timeout_ms(10), nullptr);
-      if (iree_status_is_deadline_exceeded(status)) {
-        iree_status_ignore(status);
-      } else if (!iree_status_is_ok(status)) {
-        iree_status_ignore(status);
-        return false;
-      }
-    }
-    return IsEventSignaled(event);
   }
 };
 
@@ -85,14 +67,11 @@ TEST_P(RelayWindowsTest, NotificationToPrimitive) {
       &relay));
   ASSERT_NE(relay, nullptr);
 
-  // Signal the source notification.
   iree_async_notification_signal(source_notification, 1);
+  DrainPending();
 
-  // Poll until relay fires and the sink event is signaled.
-  bool signaled = WaitEventSignaled(sink_event, 2000);
-  EXPECT_TRUE(signaled);
+  EXPECT_TRUE(IsEventSignaled(sink_event));
 
-  // One-shot relay auto-cleans up.
   CloseHandle(sink_event);
   iree_async_notification_release(source_notification);
 }
@@ -116,17 +95,15 @@ TEST_P(RelayWindowsTest, PersistentNotificationToPrimitive) {
   ASSERT_NE(relay, nullptr);
 
   for (int i = 0; i < 3; ++i) {
-    // Signal the source notification.
     iree_async_notification_signal(source_notification, 1);
+    DrainPending();
 
-    // Poll until relay fires.
-    bool signaled = WaitEventSignaled(sink_event, 2000);
-    EXPECT_TRUE(signaled) << "Relay failed to fire on iteration " << i;
-    // Auto-reset event resets after WaitForSingleObject returns WAIT_OBJECT_0,
-    // which IsEventSignaled/WaitEventSignaled uses internally.
+    EXPECT_TRUE(IsEventSignaled(sink_event))
+        << "Relay failed to fire on iteration " << i;
+    // Auto-reset event resets after WaitForSingleObject returns WAIT_OBJECT_0
+    // (consumed by IsEventSignaled), ready for the next iteration.
   }
 
-  // Explicitly unregister persistent relay.
   iree_async_proactor_unregister_relay(proactor_, relay);
   DrainPending();
 
@@ -159,37 +136,12 @@ TEST_P(RelayWindowsTest, MultipleRelaysToDifferentPrimitives) {
     ASSERT_NE(relays[i], nullptr);
   }
 
-  // Signal the source once.
   iree_async_notification_signal(source_notification, 1);
+  DrainPending();
 
-  // Poll until all sink events are signaled.
-  iree_time_t deadline = iree_time_now() + iree_make_duration_ms(2000);
-  while (iree_time_now() < deadline) {
-    PollOnce();
-    bool all_signaled = true;
-    for (int i = 0; i < kNumRelays; ++i) {
-      if (!IsEventSignaled(sink_events[i])) {
-        all_signaled = false;
-        break;
-      }
-    }
-    if (all_signaled) break;
-  }
-
-  // Verify all events were signaled. Use a separate WaitForSingleObject call
-  // with a short timeout since auto-reset events may have been consumed above.
-  // Re-fire to verify each relay independently.
-  // (The check in the poll loop above consumed the auto-reset events, so we
-  // verify by counting how many succeeded during the loop.)
-  // Instead, let's just re-signal and check each relay individually.
-
-  // The one-shot relays auto-cleaned up after firing. Verify they all fired
-  // by checking that the proactor has no more relays.
-  // The most reliable check: signal again and verify no new events fire.
   for (int i = 0; i < kNumRelays; ++i) {
-    // Events were consumed by IsEventSignaled during the poll loop above.
-    // The relays already fired (one-shot), so re-check is unnecessary.
-    // Just verify we can clean up without issues.
+    EXPECT_TRUE(IsEventSignaled(sink_events[i]))
+        << "Relay " << i << " failed to fire";
     CloseHandle(sink_events[i]);
   }
 
@@ -214,15 +166,12 @@ TEST_P(RelayWindowsTest, UnregisterWhilePending) {
       &relay));
   ASSERT_NE(relay, nullptr);
 
-  // Unregister before any signal.
   iree_async_proactor_unregister_relay(proactor_, relay);
   DrainPending();
 
-  // Signal after unregister — sink should NOT fire.
+  // Signal after unregister — no relay SQE is watching.
   iree_async_notification_signal(source_notification, 1);
-  for (int i = 0; i < 5; ++i) {
-    PollOnce();
-  }
+  DrainPending();
 
   EXPECT_FALSE(IsEventSignaled(sink_event))
       << "Relay should not fire after unregister";

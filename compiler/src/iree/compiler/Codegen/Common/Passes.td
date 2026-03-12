@@ -190,11 +190,11 @@ def ConvertWorkgroupForallToPCFPass
 def CombineResultLayoutTransformationPass :
     InterfacePass<"iree-codegen-combine-result-layout-transformation", "mlir::FunctionOpInterface"> {
   let summary =
-    "Combines layout transformation operations into a single map_scatter operation.";
+    "Combines layout transformation operations into a single map_store operation.";
   let description = [{
     Starting from the specified leaf ops, iteratively combine producer
     layout/indexing transformation ops (linalg.transpose, tensor.collapse_shape,
-    etc.) into a single iree_linalg_ext.map_scatter operation. For tensor.pad
+    etc.) into a single iree_linalg_ext.map_store operation. For tensor.pad
     ops, the writing of pad values is distributed to workgroups, and then the
     padding values are written directly to the output buffer of the
     store_to_buffer op.
@@ -223,13 +223,18 @@ def CombineResultLayoutTransformationPass :
 def CombineSourceLayoutTransformationPass :
     InterfacePass<"iree-codegen-combine-source-layout-transformation", "mlir::FunctionOpInterface"> {
   let summary =
-    "Combines layout transformation operations into a single map_gather operation.";
+    "Combines layout transformation operations into a single map_load operation.";
   let description = [{
     Starting from `iree_codegen.load_from_buffer` ops, iteratively combine
     consumer layout/indexing transformation ops (linalg.transpose,
     tensor.collapse_shape, tensor.expand_shape, tensor.extract_slice,
-    tensor.pad, etc.) into a single iree_linalg_ext.map_gather operation.
+    tensor.pad, etc.) into a single iree_linalg_ext.map_load operation.
   }];
+  let options = [
+    Option<"testCombineNonComplexChains", "test-combine-non-complex-chains",
+           "bool", /*default=*/"false",
+           "For lit-testing: combine all relayout chains, not just complex ones. Not for general usage.">,
+  ];
   let dependentDialects = [
     "affine::AffineDialect",
     "arith::ArithDialect",
@@ -639,7 +644,9 @@ def GenericVectorizationPass :
       "Enable folding casting ops into vector.contract.">,
     Option<"maxVectorSize", "max-vector-size", "int64_t",
             /*default=*/"2147483647",
-           "Max vector size allowed to avoid creating large vectors.">
+           "Max vector size allowed to avoid creating large vectors.">,
+    Option<"vectorizeMapStore", "vectorize-map-store", "bool", /*default=*/"false",
+      "Enable vectorization of iree_linalg_ext.map_store operations via VectorizableOpInterface.">
   ];
   let dependentDialects = [
     "::mlir::arith::ArithDialect"
@@ -885,6 +892,27 @@ def MaterializeUserConfigsPass : Pass<"iree-codegen-materialize-user-configs", "
   ];
 }
 
+def MaterializeVectorMaskingPass :
+    InterfacePass<"iree-codegen-materialize-vector-masking", "mlir::FunctionOpInterface"> {
+  let summary = "Materialize vector masking by unwrapping and decomposing.";
+  let description = [{
+    Materialize vector masking through two main transformations:
+    - Unwrap `vector.mask { vector.X }` patterns and pad the `vector.X` operands
+      with the corresponding identity values instead.
+    - Decompose `vector.create_mask` and `vector.constant_mask` operations into
+      a combination of `vector.step` and comparison with the mask bounds.
+    This materializes masking for downstream passes by eliminating the masking operation.
+  }];
+  let dependentDialects = [
+    "arith::ArithDialect"
+  ];
+  let options = [
+    Option<"decomposeMasks", "decompose-masks", "bool",
+           /*default=*/"true",
+           "Decompose vector.create_mask and vector.constant_mask operations.">,
+  ];
+}
+
 def MemrefCopyToLinalgPass :
     InterfacePass<"iree-codegen-memrefcopy-to-linalg", "mlir::FunctionOpInterface"> {
   let summary = "Convert memref.copy to linalg op";
@@ -1069,11 +1097,11 @@ def TestPartitionableLoopsInterfacePass :
   let summary = "Test the PartitionableLoopsInterface";
 }
 
-def TestVectorLayoutAnalysisPass : Pass<"iree-codegen-test-vector-layout-analysis", ""> {
+def TestVectorLayoutAnalysisPass : InterfacePass<"iree-codegen-test-vector-layout-analysis", "mlir::FunctionOpInterface"> {
   let summary = "Test the vector layout analysis.";
   let description = [{
     Run VectorLayoutAnalysis on the root operation. The analysis emits remarks
-    for the layout for each SSA value infered on it's owning operation.
+    for the layout for each SSA value inferred on it's owning operation.
   }];
 }
 
@@ -1153,7 +1181,7 @@ def TransformDialectInterpreterPass :
 
 def TypePropagationPass :
     InterfacePass<"iree-codegen-type-propagation", "mlir::FunctionOpInterface"> {
-  let summary = "Propogate the type of tensor to avoid load/stores of illegal bit widths";
+  let summary = "Propagate the type of tensor to avoid load/stores of illegal bit widths";
 }
 
 def UnrollAnnotatedLoopsPass :

@@ -40,6 +40,12 @@ from setuptools import Extension, find_namespace_packages, setup
 from setuptools.command.build_ext import build_ext as _build_ext
 from setuptools.command.build_py import build_py as _build_py
 
+# Detect whether we should build an abi3 (Stable ABI) wheel.
+# This applies to CPython 3.12+ when not in free-threaded mode.
+_is_abi3_build = sys.version_info >= (3, 12) and not sysconfig.get_config_var(
+    "Py_GIL_DISABLED"
+)
+
 
 def getenv_bool(key: str, cmake_arg: str, default_value="OFF"):
     if cmake_arg == "" or cmake_arg[0] != "@":
@@ -320,6 +326,8 @@ def build_configuration(cmake_build_dir, cmake_install_dir, extra_cmake_args=())
             ),
             get_env_cmake_list("IREE_EXTERNAL_HAL_DRIVERS", ""),
         ] + list(extra_cmake_args)
+        if _is_abi3_build:
+            cmake_args.append("-DIREE_ENABLE_PYTHON_STABLE_ABI=ON")
         add_env_cmake_setting(cmake_args, "IREE_TRACING_PROVIDER")
         add_env_cmake_setting(cmake_args, "IREE_TRACING_PROVIDER_H")
 
@@ -466,8 +474,8 @@ class CustomBuild(_build):
 
 
 class CMakeExtension(Extension):
-    def __init__(self, name, sourcedir=""):
-        Extension.__init__(self, name, sources=[])
+    def __init__(self, name, sourcedir="", **kwargs):
+        Extension.__init__(self, name, sources=[], **kwargs)
         self.sourcedir = os.path.abspath(sourcedir)
 
 
@@ -477,6 +485,24 @@ class NoopBuildExtension(_build_ext):
 
     def build_extension(self, ext):
         pass
+
+
+# Override bdist_wheel to produce abi3 wheel tags when applicable.
+_bdist_wheel_cmdclass = {}
+try:
+    from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+
+    class bdist_wheel(_bdist_wheel):
+        def get_tag(self):
+            python, abi, plat = _bdist_wheel.get_tag(self)
+            if _is_abi3_build:
+                python, abi = "cp312", "abi3"
+            return python, abi, plat
+
+    _bdist_wheel_cmdclass = {"bdist_wheel": bdist_wheel}
+except ImportError:
+    # wheel package not available (e.g., during sdist). Not an error.
+    pass
 
 
 def generate_version_py():
@@ -562,7 +588,6 @@ setup(
         "Development Status :: 3 - Alpha",
         "License :: OSI Approved :: Apache Software License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
@@ -573,22 +598,31 @@ setup(
         "repository": "https://github.com/iree-org/iree",
         "documentation": "https://iree.dev/reference/bindings/python/",
     },
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     ext_modules=(
         [
-            CMakeExtension("iree._runtime_libs._runtime"),
+            CMakeExtension(
+                "iree._runtime_libs._runtime", py_limited_api=_is_abi3_build
+            ),
         ]
         + (
-            [CMakeExtension("iree._runtime_libs_tracy._runtime")]
+            [
+                CMakeExtension(
+                    "iree._runtime_libs_tracy._runtime", py_limited_api=_is_abi3_build
+                )
+            ]
             if ENABLE_TRACY
             else []
         )
     ),
-    cmdclass={
-        "build": CustomBuild,
-        "built_ext": NoopBuildExtension,
-        "build_py": CMakeBuildPy,
-    },
+    cmdclass=combine_dicts(
+        {
+            "build": CustomBuild,
+            "built_ext": NoopBuildExtension,
+            "build_py": CMakeBuildPy,
+        },
+        _bdist_wheel_cmdclass,
+    ),
     zip_safe=False,
     package_dir=combine_dicts(
         {
@@ -617,6 +651,8 @@ setup(
         {
             "iree._runtime_libs": [
                 f"*{sysconfig.get_config_var('EXT_SUFFIX')}",
+                "*.abi3.so",
+                "*.pyd",
                 "iree-run-module*",
                 "iree-benchmark-executable*",
                 "iree-benchmark-module*",
@@ -634,6 +670,8 @@ setup(
             {
                 "iree._runtime_libs_tracy": [
                     f"*{sysconfig.get_config_var('EXT_SUFFIX')}",
+                    "*.abi3.so",
+                    "*.pyd",
                     "iree-run-module*",
                     "iree-benchmark-executable*",
                     "iree-benchmark-module*",

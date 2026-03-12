@@ -18,8 +18,13 @@
 //   Unlike poll(), which returns a combined bitmask, the proactor may see the
 //   same fd multiple times per poll iteration. The proactor's dispatch loop
 //   handles this correctly by filtering operations against per-event revents.
-// - Filter add/modify/remove operations are batched into a single kevent()
-//   call. kevent(2) processes entries sequentially (not atomically), so
+// - Filter add/modify/remove operations use EV_RECEIPT mode to prevent event
+//   consumption during registration. Without EV_RECEIPT, kevent can deliver
+//   ready events in the eventlist alongside error receipts during EV_ADD,
+//   and on macOS XNU these delivered events may not be re-delivered on the
+//   subsequent wait call. EV_RECEIPT forces kevent to return only error
+//   receipts (one per changelist entry).
+// - kevent(2) processes entries sequentially (not atomically), so
 //   iree_kqueue_submit_changes rolls back successfully-applied EV_ADD entries
 //   when a later entry fails (all-or-nothing semantics for adds).
 //
@@ -83,6 +88,13 @@ static short iree_kevent_to_poll_events(const struct kevent* event) {
 
 // Submits a batch of changelist entries to the kqueue.
 //
+// Uses EV_RECEIPT mode: kevent returns exactly one EV_ERROR receipt per
+// changelist entry (data=0 for success, data=errno for failure). This prevents
+// the kernel from delivering ready events in the eventlist during filter
+// registration — without EV_RECEIPT, macOS XNU can "consume" a level-triggered
+// event during EV_ADD, and the subsequent kevent() wait call may not re-deliver
+// it until a new state transition occurs (new data arrival).
+//
 // kevent(2) processes changelist entries sequentially, not atomically: if the
 // first EV_ADD succeeds and the second EV_ADD fails, the first filter is
 // already registered in the kernel. This function provides all-or-nothing
@@ -94,13 +106,19 @@ static short iree_kevent_to_poll_events(const struct kevent* event) {
 static iree_status_t iree_kqueue_submit_changes(int kqueue_fd, int fd,
                                                 struct kevent* changelist,
                                                 int change_count) {
-  // kevent() with a zero timeout applies all changelist entries and returns
-  // immediately. The eventlist receives EV_ERROR entries for any changelist
-  // items that failed, plus any already-ready events. We size the eventlist
-  // to the changelist length so we can receive an error for every entry.
   struct kevent eventlist[4];  // max 4 changes (2 deletes + 2 adds in modify)
   IREE_ASSERT(change_count <= 4);
 
+  // Add EV_RECEIPT to each changelist entry. With EV_RECEIPT, kevent returns
+  // exactly change_count entries in eventlist, each with EV_ERROR set. The
+  // data field is 0 for success or errno for failure. No ready events are
+  // returned, which prevents event consumption during filter registration.
+  for (int i = 0; i < change_count; ++i) {
+    changelist[i].flags |= EV_RECEIPT;
+  }
+
+  // No timeout needed with EV_RECEIPT: kevent processes the changelist and
+  // returns receipts without waiting for events.
   struct timespec zero_timeout = {0, 0};
   int result = kevent(kqueue_fd, changelist, change_count, eventlist,
                       change_count, &zero_timeout);
@@ -112,29 +130,17 @@ static iree_status_t iree_kqueue_submit_changes(int kqueue_fd, int fd,
                             fd, strerror(error));
   }
 
-  // First pass: match each EV_ERROR event back to its changelist entry and
-  // determine which entries failed. Entries without a matching EV_ERROR
-  // succeeded. Track the first fatal error (non-ignorable) to return.
+  // With EV_RECEIPT, result == change_count and eventlist[i] corresponds
+  // positionally to changelist[i]. Each entry has EV_ERROR set with data=0
+  // (success) or data=errno (failure).
   bool changelist_failed[4] = {false, false, false, false};
   iree_status_t error_status = iree_ok_status();
   for (int i = 0; i < result; ++i) {
-    if (!(eventlist[i].flags & EV_ERROR)) continue;
     int error = (int)eventlist[i].data;
+    if (error == 0) continue;  // Success receipt.
 
-    // Match the error event back to the changelist entry by ident+filter.
-    int matched_index = -1;
-    bool is_delete = false;
-    for (int j = 0; j < change_count; ++j) {
-      if (changelist[j].ident == eventlist[i].ident &&
-          changelist[j].filter == eventlist[i].filter) {
-        matched_index = j;
-        is_delete = (changelist[j].flags & EV_DELETE) != 0;
-        break;
-      }
-    }
-    if (matched_index >= 0) {
-      changelist_failed[matched_index] = true;
-    }
+    changelist_failed[i] = true;
+    bool is_delete = (changelist[i].flags & EV_DELETE) != 0;
 
     // For DELETE operations, ENOENT (filter not registered) and EBADF (fd
     // already closed) are expected and harmless — the filter is already gone.

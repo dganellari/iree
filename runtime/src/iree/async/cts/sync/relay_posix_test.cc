@@ -19,19 +19,24 @@
 //   - Persistence (one-shot vs persistent re-arming)
 //   - Flag behavior (OWN_SOURCE_PRIMITIVE, ERROR_SENSITIVE)
 //   - Lifecycle (unregister while pending, multiple active relays)
+//
+// Synchronization model: relay CQEs are processed synchronously during
+// DrainPending (immediate-timeout polls with GETEVENTS flush). After
+// DrainPending returns, all relay side effects (sink fd writes, notification
+// epoch increments) are complete. No timing-based waits are needed.
 
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+
+#include <atomic>
+#include <thread>
 
 #include "iree/async/relay.h"
 
 #ifdef __linux__
 #include <sys/eventfd.h>
 #endif  // __linux__
-
-#include <atomic>
-#include <thread>
 
 #include "iree/async/cts/util/registry.h"
 #include "iree/async/cts/util/test_base.h"
@@ -94,26 +99,6 @@ class RelayPosixTest : public CtsTestBase<> {
     return false;
   }
 
-  // Waits for a primitive to become readable with a timeout.
-  // Polls the proactor between reads to allow relay dispatch.
-  bool WaitPrimitiveReadable(const TestPrimitive& primitive,
-                             iree_duration_t timeout_ns) {
-    iree_time_t deadline = iree_time_now() + timeout_ns;
-    while (iree_time_now() < deadline) {
-      uint64_t value;
-      if (DrainPrimitive(primitive, &value)) return true;
-      iree_status_t status = iree_async_proactor_poll(
-          proactor_, iree_make_timeout_ms(10), nullptr);
-      if (iree_status_is_deadline_exceeded(status)) {
-        iree_status_ignore(status);
-      } else if (!iree_status_is_ok(status)) {
-        iree_status_ignore(status);
-        return false;
-      }
-    }
-    return false;
-  }
-
   // Closes a primitive pair, handling eventfd (one fd) vs pipe (two fds).
   void ClosePrimitive(TestPrimitive& primitive) {
     if (primitive.source_fd >= 0) {
@@ -144,9 +129,9 @@ TEST_P(RelayPosixTest, PrimitiveToPrimitive) {
   ASSERT_NE(relay, nullptr);
 
   SignalPrimitive(source);
+  DrainPending();
 
-  bool sink_signaled = WaitPrimitiveReadable(sink, iree_make_duration_ms(1000));
-  EXPECT_TRUE(sink_signaled);
+  EXPECT_TRUE(DrainPrimitive(sink));
 
   ClosePrimitive(source);
   ClosePrimitive(sink);
@@ -170,32 +155,32 @@ TEST_P(RelayPosixTest, PrimitiveToNotification) {
       &relay));
   ASSERT_NE(relay, nullptr);
 
-  std::atomic<bool> waiter_started{false};
-  std::atomic<bool> waiter_woken{false};
+  // Use epoch-based gate pattern: capture baseline before starting the waiter,
+  // then use iree_notification_await with a predicate that checks the epoch.
+  // This avoids the three-actor race where notification_wait captures the epoch
+  // after the relay has already fired.
+  iree_notification_t gate;
+  iree_notification_initialize(&gate);
+  EpochWaitContext wait_context = {
+      sink_notification,
+      iree_async_notification_query_epoch(sink_notification)};
 
+  std::atomic<bool> waiter_woken{false};
   std::thread waiter([&]() {
-    waiter_started.store(true, std::memory_order_release);
-    bool result = iree_async_notification_wait(sink_notification,
-                                               iree_make_timeout_ms(5000));
+    bool result = iree_notification_await(&gate, epoch_advanced, &wait_context,
+                                          iree_make_timeout_ms(5000));
     waiter_woken.store(result, std::memory_order_release);
   });
 
-  while (!waiter_started.load(std::memory_order_acquire)) {
-    iree_thread_yield();
-  }
-  iree_wait_until(iree_time_now() + iree_make_duration_ms(20));
-
   SignalPrimitive(source);
+  DrainPending();
 
-  iree_time_t deadline = iree_time_now() + iree_make_duration_ms(2000);
-  while (!waiter_woken.load(std::memory_order_acquire) &&
-         iree_time_now() < deadline) {
-    PollOnce();
-  }
+  iree_notification_post(&gate, IREE_ALL_WAITERS);
 
   waiter.join();
   EXPECT_TRUE(waiter_woken.load(std::memory_order_acquire));
 
+  iree_notification_deinitialize(&gate);
   ClosePrimitive(source);
   iree_async_notification_release(sink_notification);
 }
@@ -218,9 +203,11 @@ TEST_P(RelayPosixTest, NotificationToPrimitive) {
   ASSERT_NE(relay, nullptr);
 
   iree_async_notification_signal(source_notification, 1);
+  DrainPending();
 
-  bool sink_signaled = WaitPrimitiveReadable(sink, iree_make_duration_ms(1000));
-  EXPECT_TRUE(sink_signaled);
+  uint64_t value = 0;
+  EXPECT_TRUE(DrainPrimitive(sink, &value));
+  EXPECT_EQ(value, 42u);
 
   ClosePrimitive(sink);
   iree_async_notification_release(source_notification);
@@ -245,9 +232,9 @@ TEST_P(RelayPosixTest, PersistentMultipleTransfers) {
   for (int i = 0; i < 3; ++i) {
     DrainPrimitive(sink);
     SignalPrimitive(source);
-    bool sink_signaled =
-        WaitPrimitiveReadable(sink, iree_make_duration_ms(1000));
-    EXPECT_TRUE(sink_signaled) << "Relay failed to fire on iteration " << i;
+    DrainPending();
+    EXPECT_TRUE(DrainPrimitive(sink))
+        << "Relay failed to fire on iteration " << i;
   }
 
   iree_async_proactor_unregister_relay(proactor_, relay);
@@ -274,17 +261,14 @@ TEST_P(RelayPosixTest, OneShotAutoCleanup) {
   ASSERT_NE(relay, nullptr);
 
   SignalPrimitive(source);
-  bool sink_signaled = WaitPrimitiveReadable(sink, iree_make_duration_ms(1000));
-  EXPECT_TRUE(sink_signaled);
+  DrainPending();
+  EXPECT_TRUE(DrainPrimitive(sink));
 
   // Signal source again — relay should not fire (auto-cleaned up).
   SignalPrimitive(source);
-  DrainPrimitive(sink);
   DrainPending();
 
-  uint64_t value;
-  bool got_second_signal = DrainPrimitive(sink, &value);
-  EXPECT_FALSE(got_second_signal)
+  EXPECT_FALSE(DrainPrimitive(sink))
       << "One-shot relay should not fire after cleanup";
 
   ClosePrimitive(source);
@@ -308,7 +292,8 @@ TEST_P(RelayPosixTest, OwnSourcePrimitive) {
   ASSERT_NE(relay, nullptr);
 
   SignalPrimitive(source);
-  WaitPrimitiveReadable(sink, iree_make_duration_ms(1000));
+  DrainPending();
+  DrainPrimitive(sink);
 
   // The source_fd should now be closed by the relay cleanup.
   // Verify by trying to write — should fail with EBADF.
@@ -349,11 +334,10 @@ TEST_P(RelayPosixTest, MultipleActiveRelays) {
   for (int i = 0; i < kNumRelays; ++i) {
     SignalPrimitive(sources[i]);
   }
+  DrainPending();
 
   for (int i = 0; i < kNumRelays; ++i) {
-    bool sink_signaled =
-        WaitPrimitiveReadable(sinks[i], iree_make_duration_ms(1000));
-    EXPECT_TRUE(sink_signaled) << "Relay " << i << " failed to fire";
+    EXPECT_TRUE(DrainPrimitive(sinks[i])) << "Relay " << i << " failed to fire";
   }
 
   for (int i = 0; i < kNumRelays; ++i) {
@@ -385,21 +369,10 @@ TEST_P(RelayPosixTest, ErrorSensitiveSuppressesSinkOnPollHup) {
       iree_async_relay_error_callback_none(), &relay));
   ASSERT_NE(relay, nullptr);
 
-  // Close the write end to cause POLLHUP on the read end.
+  // Close the write end to cause POLLHUP on the read end. The POLL_ADD CQE
+  // is produced synchronously by the kernel and flushed on the next poll.
   close(write_fd);
-
-  // Poll to process the POLLHUP event.
-  iree_time_t deadline = iree_time_now() + iree_make_duration_ms(500);
-  while (iree_time_now() < deadline) {
-    iree_status_t status =
-        iree_async_proactor_poll(proactor_, iree_make_timeout_ms(50), nullptr);
-    if (iree_status_is_deadline_exceeded(status)) {
-      iree_status_ignore(status);
-    } else if (!iree_status_is_ok(status)) {
-      iree_status_ignore(status);
-      break;
-    }
-  }
+  DrainPending();
 
   uint64_t value;
   bool got_signal = DrainPrimitive(sink, &value);
@@ -426,9 +399,10 @@ TEST_P(RelayPosixTest, ErrorSensitiveFiresOnNormalPollin) {
   ASSERT_NE(relay, nullptr);
 
   SignalPrimitive(source);
+  DrainPending();
 
-  bool sink_signaled = WaitPrimitiveReadable(sink, iree_make_duration_ms(1000));
-  EXPECT_TRUE(sink_signaled) << "ERROR_SENSITIVE should fire on normal POLLIN";
+  EXPECT_TRUE(DrainPrimitive(sink))
+      << "ERROR_SENSITIVE should fire on normal POLLIN";
 
   ClosePrimitive(source);
   ClosePrimitive(sink);
@@ -453,8 +427,8 @@ TEST_P(RelayPosixTest, OwnSourcePrimitiveOnUnregister) {
   ASSERT_NE(relay, nullptr);
 
   SignalPrimitive(source);
-  bool sink_signaled = WaitPrimitiveReadable(sink, iree_make_duration_ms(1000));
-  EXPECT_TRUE(sink_signaled);
+  DrainPending();
+  DrainPrimitive(sink);
 
   iree_async_proactor_unregister_relay(proactor_, relay);
   DrainPending();
@@ -497,8 +471,6 @@ TEST_P(RelayPosixTest, UnregisterWhilePending) {
   uint64_t value;
   bool got_signal = DrainPrimitive(sink, &value);
   EXPECT_FALSE(got_signal) << "Relay should not fire after unregister";
-
-  DrainPending();
 
   ClosePrimitive(source);
   ClosePrimitive(sink);

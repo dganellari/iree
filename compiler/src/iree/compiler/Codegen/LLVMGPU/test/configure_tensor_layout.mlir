@@ -41,9 +41,9 @@ func.func @matmul_96x64x16_mfma(%lhs: tensor<96x16xf16>,
 
 // CHECK-LABEL: func.func @matmul_96x64x16_mfma
 
-// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]]) {mma_kind = #iree_gpu.mma_layout<MFMA_F32_32x32x8_F16>}
-// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]]) {mma_kind = #iree_gpu.mma_layout<MFMA_F32_32x32x8_F16>}
-// CHECK-DAG: %[[ACC:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED2]]) {mma_kind = #iree_gpu.mma_layout<MFMA_F32_32x32x8_F16>}
+// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]])
+// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]])
+// CHECK-DAG: %[[ACC:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED2]])
 // CHECK: linalg.generic
 // CHECK-SAME: ins(%[[LHS]], %[[RHS]]
 // CHECK-SAME: outs(%[[ACC]]
@@ -91,9 +91,9 @@ func.func @matmul_96x64x16_wmmar3(%lhs: tensor<96x16xf16>,
 
 // CHECK-LABEL: func.func @matmul_96x64x16_wmmar3
 
-// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]]) {mma_kind = #iree_gpu.mma_layout<WMMAR3_F32_16x16x16_F16>}
-// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]]) {mma_kind = #iree_gpu.mma_layout<WMMAR3_F32_16x16x16_F16>}
-// CHECK-DAG: %[[ACC:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED2]]) {mma_kind = #iree_gpu.mma_layout<WMMAR3_F32_16x16x16_F16>}
+// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]])
+// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]])
+// CHECK-DAG: %[[ACC:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED2]])
 // CHECK: linalg.generic
 // CHECK-SAME: ins(%[[LHS]], %[[RHS]]
 // CHECK-SAME: outs(%[[ACC]]
@@ -141,9 +141,9 @@ func.func @matmul_96x64x16_wmmar4(%lhs: tensor<96x16xf16>,
 
 // CHECK-LABEL: func.func @matmul_96x64x16_wmmar4
 
-// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]]) {mma_kind = #iree_gpu.mma_layout<WMMAR4_F32_16x16x16_F16>}
-// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]]) {mma_kind = #iree_gpu.mma_layout<WMMAR4_F32_16x16x16_F16>}
-// CHECK-DAG: %[[ACC:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED2]]) {mma_kind = #iree_gpu.mma_layout<WMMAR4_F32_16x16x16_F16>}
+// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]])
+// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]])
+// CHECK-DAG: %[[ACC:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED2]])
 // CHECK: linalg.generic
 // CHECK-SAME: ins(%[[LHS]], %[[RHS]]
 // CHECK-SAME: outs(%[[ACC]]
@@ -190,9 +190,9 @@ func.func @matmul_96x64x32_wmma_gfx1250(%lhs: tensor<96x32xf16>,
 
 // CHECK-LABEL: func.func @matmul_96x64x32_wmma_gfx1250
 
-// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]]) {mma_kind = #iree_gpu.mma_layout<WMMA_F32_16x16x32_F16>}
-// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]]) {mma_kind = #iree_gpu.mma_layout<WMMA_F32_16x16x32_F16>}
-// CHECK-DAG: %[[ACC:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED2]]) {mma_kind = #iree_gpu.mma_layout<WMMA_F32_16x16x32_F16>}
+// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]])
+// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]])
+// CHECK-DAG: %[[ACC:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED2]])
 // CHECK: linalg.generic
 // CHECK-SAME: ins(%[[LHS]], %[[RHS]]
 // CHECK-SAME: outs(%[[ACC]]
@@ -240,9 +240,9 @@ func.func @matmul_128x64x16_multi_subgroup(%lhs: tensor<128x16xf16>,
 
 // CHECK-LABEL: func.func @matmul_128x64x16_multi_subgroup
 
-// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]]) {mma_kind = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16>}
-// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]]) {mma_kind = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16>}
-// CHECK-DAG: %[[ACC:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED2]]) {mma_kind = #iree_gpu.mma_layout<MFMA_F32_16x16x16_F16>}
+// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]])
+// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]])
+// CHECK-DAG: %[[ACC:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED2]])
 // CHECK: linalg.generic
 // CHECK-SAME: ins(%[[LHS]], %[[RHS]]
 // CHECK-SAME: outs(%[[ACC]]
@@ -367,3 +367,56 @@ func.func @dynamic_infer_sizes_lowering_config(%in : tensor<4x32x?x128xf16>) -> 
 // CHECK: %[[EMPTYL:.+]] = iree_vector_ext.to_layout %[[EMPTY]] to layout(#[[LAYOUT]]) : tensor<1x1x?x128xf16>
 // CHECK: %[[COPY:.+]] = linalg.copy {{.*}} ins(%[[EXTRACTL]] : tensor<1x1x?x128xf16>) outs(%[[EMPTYL]] : tensor<1x1x?x128xf16>)
 // CHECK: iree_vector_ext.to_layout %[[COPY]] to layout(#[[LAYOUT]]) : tensor<1x1x?x128xf16>
+
+// -----
+
+// Verify that the batch tile for a dimension that requires ceil division
+// (63 / 8 = 8, not 7) is computed correctly.
+
+#translation = #iree_codegen.translation_info<pipeline = LLVMGPUVectorDistribute
+                                              workgroup_size = [512, 1, 1]
+                                              subgroup_size = 64>
+
+#maps = [
+  affine_map<(d0, d1, d2, d3) -> (d0, d1, d2)>,
+  affine_map<(d0, d1, d2, d3) -> (d0, d3, d2)>,
+  affine_map<(d0, d1, d2, d3) -> (d0, d3, d1)>
+]
+
+#traits = {
+  indexing_maps = #maps,
+  iterator_types = ["parallel", "parallel", "reduction", "parallel"],
+  lowering_config = #iree_gpu.lowering_config<{
+    lane_basis = [[1, 1, 1, 1, 64], [1, 0, 3, 4]],
+    subgroup_basis = [[1, 1, 1, 1, 8], [0, 1, 2, 4]],
+    thread = [0, 0, 8, 0]
+  }>
+}
+
+func.func @contraction_ceildiv_batch(%lhs: tensor<1x1x63xf16>,
+                                     %rhs: tensor<1x512x63xf16>,
+                                     %init: tensor<1x512x1xf32>)
+                                     -> tensor<1x512x1xf32>
+                                     attributes { translation_info = #translation } {
+  %out = linalg.generic #traits
+                        ins(%lhs, %rhs: tensor<1x1x63xf16>, tensor<1x512x63xf16>)
+                        outs(%init: tensor<1x512x1xf32>) {
+    ^bb0(%in: f16, %in_1: f16, %out: f32):
+      %ex   = arith.extf %in   : f16 to f32
+      %ex_1 = arith.extf %in_1 : f16 to f32
+      %mul  = arith.mulf %ex, %ex_1 : f32
+      %sum  = arith.addf %mul, %out : f32
+      linalg.yield %sum : f32
+  } -> tensor<1x512x1xf32>
+  return %out : tensor<1x512x1xf32>
+}
+
+// CHECK-DAG: #[[$NESTED:.+]] = #iree_vector_ext.nested_layout<{{.*}}batch_tile = [1, 1, 8]{{.*}}element_tile = [1, 1, 8]{{.*}}>
+// CHECK-DAG: #[[$NESTED1:.+]] = #iree_vector_ext.nested_layout<{{.*}}batch_tile = [1, 1, 8]{{.*}}element_tile = [1, 1, 8]{{.*}}>
+
+// CHECK-LABEL: func.func @contraction_ceildiv_batch
+
+// CHECK-DAG: %[[LHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED]])
+// CHECK-DAG: %[[RHS:.+]] = iree_vector_ext.to_layout %{{.*}} to layout(#[[$NESTED1]])
+// CHECK: linalg.generic
+// CHECK-SAME: ins(%[[LHS]], %[[RHS]]

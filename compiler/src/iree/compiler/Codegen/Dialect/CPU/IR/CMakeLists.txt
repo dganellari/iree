@@ -21,16 +21,20 @@ iree_cc_library(
     "IREECPUAttrs.h.inc"
     "IREECPUDialect.cpp.inc"
     "IREECPUDialect.h.inc"
+    "IREECPUEnums.cpp.inc"
+    "IREECPUEnums.h.inc"
   SRCS
     "IREECPUAttrs.cpp"
     "IREECPUDialect.cpp"
   DEPS
     ::IREECPUAttrs
     ::IREECPUDialectGen
+    ::IREECPUEnums
     LLVMSupport
     MLIRAffineDialect
     MLIRIR
     MLIRLinalgDialect
+    MLIRLinalgInterfacesIncGenLib
     MLIRParser
     MLIRSupport
     MLIRTensorDialect
@@ -52,12 +56,33 @@ iree_tablegen_library(
 
 iree_tablegen_library(
   NAME
+    IREECPUEnums
+  TD_FILE
+    "IREECPUEnums.td"
+  OUTS
+    --gen-enum-decls --dialect=iree_cpu IREECPUEnums.h.inc
+    --gen-enum-defs --dialect=iree_cpu IREECPUEnums.cpp.inc
+)
+
+iree_tablegen_library(
+  NAME
     IREECPUAttrs
   TD_FILE
     "IREECPUAttrs.td"
   OUTS
     --gen-attrdef-decls IREECPUAttrs.h.inc
     --gen-attrdef-defs IREECPUAttrs.cpp.inc
+)
+
+iree_tablegen_doc(
+  NAME
+    IREECPUDialectDocGen
+  CATEGORY
+    "Dialects"
+  TD_FILE
+    "IREECPUAttrs.td"
+  OUTS
+    --gen-dialect-doc --dialect=iree_cpu IREECPUDialect.md
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

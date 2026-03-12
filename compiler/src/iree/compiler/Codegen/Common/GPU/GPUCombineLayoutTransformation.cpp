@@ -56,7 +56,7 @@ gpuPadDistributionConfigFn(ArrayRef<int64_t> iterationBounds,
   return {workgroupDistributionConfig, threadDistributionConfig};
 }
 
-/// The control function for when to fold a relayout op chain into a map_scatter
+/// The control function for when to fold a relayout op chain into a map_store
 /// op. Only combine complex relayout sequences at the end of a dispatch that
 /// are difficult to handle in GPU Codegen. Any of the following list of
 /// conditions are considered to indicate a complex relayout sequence, and will
@@ -83,7 +83,7 @@ static bool gpuRelayoutCombinationControlFn(OpResult leaf) {
   }
   llvm::SetVector<Operation *> slice;
   BackwardSliceOptions options;
-  options.filter = isSupportedSingleInputRelayoutOp;
+  options.filter = isSupportedSingleInputRelayoutOpForResult;
   options.inclusive = true;
   LogicalResult result = getBackwardSlice(leaf, &slice, options);
   if (failed(result)) {

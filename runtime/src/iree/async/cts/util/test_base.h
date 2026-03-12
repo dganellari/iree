@@ -26,8 +26,10 @@
 #include <vector>
 
 #include "iree/async/cts/util/registry.h"
+#include "iree/async/notification.h"
 #include "iree/async/proactor.h"
 #include "iree/base/api.h"
+#include "iree/base/threading/notification.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 
@@ -162,6 +164,44 @@ struct CompletionLog {
     }
   }
 };
+
+//===----------------------------------------------------------------------===//
+// Epoch-based notification wait
+//===----------------------------------------------------------------------===//
+
+// Context for epoch-based notification waits using iree_notification_await().
+//
+// Enables race-free cross-thread observation of async notification signals:
+// the caller captures the baseline epoch BEFORE spawning the waiter thread,
+// and the waiter uses iree_notification_await() with a predicate that checks
+// whether the epoch has advanced. The iree_notification_t's prepare/commit/
+// cancel protocol ensures no signal is missed regardless of thread scheduling.
+//
+// Usage:
+//   iree_notification_t gate;
+//   iree_notification_initialize(&gate);
+//   EpochWaitContext context = {sink_notification,
+//       iree_async_notification_query_epoch(sink_notification)};
+//   std::thread waiter([&]() {
+//       bool woken = iree_notification_await(&gate, epoch_advanced, &context,
+//                                            timeout);
+//   });
+//   // ... trigger signal that will bump sink_notification's epoch ...
+//   iree_notification_post(&gate, IREE_ALL_WAITERS);
+//   waiter.join();
+struct EpochWaitContext {
+  iree_async_notification_t* notification;
+  uint32_t baseline_epoch;
+};
+
+// Predicate for iree_notification_await: returns true when the async
+// notification's epoch has advanced past the baseline captured at context
+// creation time. Compatible with iree_condition_fn_t.
+static bool epoch_advanced(void* arg) {
+  auto* context = static_cast<EpochWaitContext*>(arg);
+  return iree_async_notification_query_epoch(context->notification) !=
+         context->baseline_epoch;
+}
 
 //===----------------------------------------------------------------------===//
 // Test fixture

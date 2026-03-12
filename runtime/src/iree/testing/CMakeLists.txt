@@ -42,7 +42,7 @@ iree_cc_library(
     "benchmark_main.c"
   DEPS
     ::benchmark
-    iree::base::internal::flags
+    iree::base::tooling::flags
   TESTONLY
   PUBLIC
 )
@@ -71,9 +71,49 @@ iree_cc_library(
     gmock
     gtest
     iree::base
-    iree::base::internal::flags
+    iree::base::tooling::flags
   TESTONLY
   PUBLIC
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###
+
+iree_cc_library(
+  NAME
+    coordinated_test
+  HDRS
+    "coordinated_test.h"
+  SRCS
+    "coordinated_test.c"
+  DEPS
+    iree::base
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
+    coordinated_test_main
+  SRCS
+    "coordinated_test_main.cc"
+  DEPS
+    ::coordinated_test
+    ::gtest
+    gtest
+    iree::base
+    iree::base::tooling::flags
+  TESTONLY
+  PUBLIC
+)
+
+iree_cc_test(
+  NAME
+    coordinated_test_test
+  SRCS
+    "coordinated_test_test.cc"
+  DEPS
+    ::coordinated_test
+    ::coordinated_test_main
+    ::gtest
+  LABELS
+    "noriscv"
+)

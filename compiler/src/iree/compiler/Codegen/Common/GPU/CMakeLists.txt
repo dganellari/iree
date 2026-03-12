@@ -48,7 +48,6 @@ iree_cc_library(
     "GPUVectorDistribution.h"
     "Passes.h"
   SRCS
-    "AMDGPUDistributeContract.cpp"
     "AMDGPULowerCoalescedDMAToGatherLDS.cpp"
     "DecomposeHorizontallyFusedGemms.cpp"
     "ExpandGPUOps.cpp"
@@ -154,6 +153,7 @@ iree_cc_library(
     iree::compiler::Codegen::Dialect::PCF::IR
     iree::compiler::Codegen::Dialect::PCF::Transforms
     iree::compiler::Codegen::Dialect::VectorExt::IR::IREEVectorExtDialect
+    iree::compiler::Codegen::Dialect::VectorExt::Transforms::VectorExtTransforms
     iree::compiler::Codegen::Interfaces::PartitionableLoopsInterface
     iree::compiler::Codegen::Interfaces::TensorMaskingOpInterface
     iree::compiler::Codegen::Transforms

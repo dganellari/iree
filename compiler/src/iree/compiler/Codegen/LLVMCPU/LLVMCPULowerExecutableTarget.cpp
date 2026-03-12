@@ -120,7 +120,6 @@ void LLVMCPULowerExecutableTargetPass::runOnOperation() {
     return;
   }
 
-  auto pipeline = translationInfo.getDispatchLoweringPassPipeline();
   LLVMCPUPipelineOptions pipelineOpts;
   pipelineOpts.cpuOpts = cpuOptions.getValue();
 
@@ -146,6 +145,21 @@ void LLVMCPULowerExecutableTargetPass::runOnOperation() {
   pipelineOpts.enableVectorMasking =
       isX86(targetConfig) || isRISCV(targetConfig) ||
       (isAArch64(targetConfig) && hasAnySVEFeature(targetConfig));
+  // TODO(#16956): The decomposition of attention op leads to complex control
+  // flow, which leads to non-trivial stack allocation. Enforcing masking for
+  // targets that do not support native vector masking enables the
+  // functionality, though the performance may be suboptimal.
+  auto hasAttentionOp = [](FunctionOpInterface funcOp) {
+    bool hasAttention = false;
+    funcOp.walk([&](IREE::LinalgExt::AttentionOp) {
+      hasAttention = true;
+      return WalkResult::interrupt();
+    });
+    return hasAttention;
+  };
+  if (isAArch64(targetConfig) && hasAttentionOp(funcOp)) {
+    pipelineOpts.enableVectorMasking = true;
+  }
   pipelineOpts.enableAArch64SME = isAArch64(targetConfig) &&
                                   hasAnySVEFeature(targetConfig) &&
                                   hasSMEFeature(targetConfig);
@@ -155,45 +169,57 @@ void LLVMCPULowerExecutableTargetPass::runOnOperation() {
 
   LoweringConfigAttrInterface loweringConfig = getRootLoweringConfig(funcOp);
   OpPassManager passManager(func::FuncOp::getOperationName());
-  switch (pipeline) {
-  // No pipleline specified, nothing to do.
-  case IREE::Codegen::DispatchLoweringPassPipeline::None:
-    return;
-  case IREE::Codegen::DispatchLoweringPassPipeline::CPUDefault: {
-    addCPUDefaultPassPipeline(passManager, pipelineOpts);
-    break;
-  }
-  case IREE::Codegen::DispatchLoweringPassPipeline::
-      CPUBufferOpsTileAndVectorize: {
-    addCPUBufferOpsTileAndVectorizePipeline(passManager, pipelineOpts);
-    break;
-  }
-  case IREE::Codegen::DispatchLoweringPassPipeline::CPUDoubleTilingExpert: {
-    assert(loweringConfig && "expected a valid lowering config");
-    addMultiTilingExpertPassPipeline(passManager, loweringConfig, pipelineOpts);
-    break;
-  }
-  case IREE::Codegen::DispatchLoweringPassPipeline::
-      CPUConvTileAndDecomposeExpert: {
-    addConvTileAndDecomposeExpertPassPipeline(passManager, pipelineOpts);
-    break;
-  }
-  case IREE::Codegen::DispatchLoweringPassPipeline::Mmt4dTilingExpert: {
-    addMmt4dTilingExpertPassPipeline(passManager, pipelineOpts);
-    break;
-  }
-  case IREE::Codegen::DispatchLoweringPassPipeline::CPUDataTiling: {
-    addCPUDataTilingPipeline(passManager, pipelineOpts);
-    break;
-  }
-  case IREE::Codegen::DispatchLoweringPassPipeline::
-      CPULinalgExtTileAndVectorize: {
-    addCPULinalgExtTileAndVectorizePipeline(passManager, pipelineOpts);
-    break;
-  }
-  default:
-    funcOp.emitOpError("Unsupported pipeline on CPU target.");
-    return signalPassFailure();
+
+  // Check for a custom pipeline via PipelineAttrInterface.
+  Attribute pipelineAttr = translationInfo.getPassPipeline();
+  if (auto customPipeline =
+          dyn_cast<IREE::Codegen::PipelineAttrInterface>(pipelineAttr)) {
+    if (failed(customPipeline.buildPipeline(passManager))) {
+      funcOp.emitOpError("failed to build custom pass pipeline");
+      return signalPassFailure();
+    }
+  } else {
+    switch (translationInfo.getDispatchLoweringPassPipeline()) {
+    // No pipeline specified, nothing to do.
+    case IREE::Codegen::DispatchLoweringPassPipeline::None:
+      return;
+    case IREE::Codegen::DispatchLoweringPassPipeline::CPUDefault: {
+      addCPUDefaultPassPipeline(passManager, pipelineOpts);
+      break;
+    }
+    case IREE::Codegen::DispatchLoweringPassPipeline::
+        CPUBufferOpsTileAndVectorize: {
+      addCPUBufferOpsTileAndVectorizePipeline(passManager, pipelineOpts);
+      break;
+    }
+    case IREE::Codegen::DispatchLoweringPassPipeline::CPUDoubleTilingExpert: {
+      assert(loweringConfig && "expected a valid lowering config");
+      addMultiTilingExpertPassPipeline(passManager, loweringConfig,
+                                       pipelineOpts);
+      break;
+    }
+    case IREE::Codegen::DispatchLoweringPassPipeline::
+        CPUConvTileAndDecomposeExpert: {
+      addConvTileAndDecomposeExpertPassPipeline(passManager, pipelineOpts);
+      break;
+    }
+    case IREE::Codegen::DispatchLoweringPassPipeline::Mmt4dTilingExpert: {
+      addMmt4dTilingExpertPassPipeline(passManager, pipelineOpts);
+      break;
+    }
+    case IREE::Codegen::DispatchLoweringPassPipeline::CPUDataTiling: {
+      addCPUDataTilingPipeline(passManager, pipelineOpts);
+      break;
+    }
+    case IREE::Codegen::DispatchLoweringPassPipeline::
+        CPULinalgExtTileAndVectorize: {
+      addCPULinalgExtTileAndVectorizePipeline(passManager, pipelineOpts);
+      break;
+    }
+    default:
+      funcOp.emitOpError("Unsupported pipeline on CPU target.");
+      return signalPassFailure();
+    }
   }
 
   if (failed(runPipeline(passManager, funcOp))) {

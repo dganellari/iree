@@ -8,7 +8,6 @@
 
 #include "iree/base/internal/math.h"
 #include "iree/base/internal/wait_handle.h"
-#include "iree/base/status.h"
 #include "iree/base/threading/mutex.h"
 #include "iree/hal/drivers/hip/dynamic_symbols.h"
 #include "iree/hal/drivers/hip/event_pool.h"
@@ -60,7 +59,7 @@ typedef enum {
 // will also be cleaned up at this time. If the semaphore is failed,
 // the callbacks will be called with the status code of the failure.
 // If the semaphore is destroyed while callbacks are active,
-// they will be called with the CANCELLED erorr.
+// they will be called with the CANCELLED error.
 // The |cpu_event| is a value for the CPU to wait on when
 // we may not have to wait infinitely. For example with a multi
 // wait or a non-infinite timeout.
@@ -1165,6 +1164,11 @@ bool iree_hal_hip_semaphore_timepoint_already_exported(
   return ret;
 }
 
+static bool iree_hal_hip_semaphore_timepoint_already_exported_thunk(void* arg) {
+  return iree_hal_hip_semaphore_timepoint_already_exported(
+      (iree_hal_hip_semaphore_external_timepoint_wait_data_t*)arg);
+}
+
 iree_status_t iree_hal_hip_semaphore_for_exported_timepoints(
     iree_hal_semaphore_t* base_semaphore, uint64_t value) {
   int64_t value_to_wait_for = 0;
@@ -1198,8 +1202,8 @@ iree_status_t iree_hal_hip_semaphore_for_exported_timepoints(
         .semaphore = semaphore, .value = value_to_wait_for};
     iree_notification_await(
         &semaphore->external_event_notification,
-        (iree_condition_fn_t)iree_hal_hip_semaphore_timepoint_already_exported,
-        &dat, iree_infinite_timeout());
+        iree_hal_hip_semaphore_timepoint_already_exported_thunk, &dat,
+        iree_infinite_timeout());
     IREE_TRACE_ZONE_END(z0);
   }
   return iree_ok_status();

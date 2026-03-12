@@ -29,16 +29,11 @@ void populateContractPromotionPatterns(RewritePatternSet &patterns,
 
 void populateDropSharedMemoryDeallocOpPatterns(RewritePatternSet &patterns);
 
+/// Adds patterns to convert stretching broadcasts (broadcasting a non-unit dim
+/// from 1) into broadcast + transpose so that layout analysis can handle them.
+void populateVectorLayoutCanonicalizations(RewritePatternSet &patterns);
+
 void populateGPUDistributionPatterns(RewritePatternSet &patterns);
-
-void populateGPUDistributeNestedLayoutAttrPatterns(
-    RewritePatternSet &patterns, Value threadId, int64_t subgroupSize,
-    ArrayRef<int64_t> workgroupSize, int64_t maxBitsPerShuffle = 32);
-
-// Adds patterns that distributes vector.contract ops with nested layout
-// annotations to amdgpu.mfma ops.
-void populateGPUDistributeNestedLayoutContractAMDGPUPatterns(
-    RewritePatternSet &patterns);
 
 } // namespace mlir::iree_compiler
 

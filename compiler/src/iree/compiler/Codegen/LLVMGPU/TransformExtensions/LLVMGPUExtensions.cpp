@@ -11,6 +11,7 @@
 #include "iree/compiler/Codegen/Common/GPU/GPUVectorDistribution.h"
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/VectorExt/Transforms/DistributionPatterns.h"
 #include "iree/compiler/Codegen/LLVMGPU/Utils/LLVMGPUUtils.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "llvm/ADT/STLExtras.h"
@@ -442,7 +443,7 @@ struct WarpOpLoad : public OpRewritePattern<gpu::WarpExecuteOnLane0Op> {
     OpBuilder::InsertionGuard g(rewriter);
     rewriter.setInsertionPointAfter(warpOp);
     // TODO: generalize this.
-    // options.warpSyncronizationFn currently must take a
+    // options.warpSynchronizationFn currently must take a
     // WarpExecuteOnLane0Op which we don't have here.
     gpu::BarrierOp::create(rewriter, load.getLoc(), load.getMemref());
     Value newRead = memref::LoadOp::create(rewriter, load.getLoc(),
@@ -466,7 +467,7 @@ struct WarpOpLoad : public OpRewritePattern<gpu::WarpExecuteOnLane0Op> {
   }
 };
 
-/// Shared memory allocations are representated as AllocOp in IREE but they
+/// Shared memory allocations are represented as AllocOp in IREE but they
 /// really have the semantic of global variables. Therefore hoisting them is
 /// always correct for static allocations.
 struct HoistSharedMemoryAlloc : public OpRewritePattern<memref::AllocOp> {
@@ -499,7 +500,7 @@ static void populateMultiReductionLoweringPatterns(Operation *target,
                                                    PatternBenefit benefit) {
   assert(target->hasTrait<OpTrait::IsIsolatedFromAbove>());
 
-  vector::populateVectorMultiReductionReorderAndExpandPatterns(
+  vector::populateVectorMultiReductionReorderPatterns(
       patterns, vector::VectorMultiReductionLowering::InnerReduction, benefit);
   vector::populateVectorMultiReductionFlatteningPatterns(
       patterns, vector::VectorMultiReductionLowering::InnerReduction, benefit);
@@ -565,8 +566,8 @@ static void populatePropagateVectorDistribution(Operation *target,
                                                    benefit);
 }
 
-static void warpSyncronizationFn(Location loc, OpBuilder &builder,
-                                 gpu::WarpExecuteOnLane0Op warpOp) {
+static void warpSynchronizationFn(Location loc, OpBuilder &builder,
+                                  gpu::WarpExecuteOnLane0Op warpOp) {
   // The memory we must synchronize on is in shared memory.
   gpu::BarrierOp::create(builder, loc, gpu::AddressSpace::Workgroup);
 };
@@ -632,7 +633,7 @@ transform_dialect::VectorWarpDistributionOp::applyToOne(
   RewritePatternSet endPatterns(ctx);
   vector::WarpExecuteOnLane0LoweringOptions options;
   options.warpAllocationFn = allocateGlobalSharedMemory;
-  options.warpSyncronizationFn = warpSyncronizationFn;
+  options.warpSynchronizationFn = warpSynchronizationFn;
   populateWarpExecuteOnLane0ToScf(target, endPatterns, options,
                                   /*benefit=*/0);
   if (failed(applyPatternsGreedily(target, std::move(endPatterns), config))) {
@@ -919,8 +920,8 @@ transform_dialect::AMDGPUDistributeVectorsOp::applyToOne(
   ArrayRef<int64_t> workgroupSize = getWorkgroupSize();
 
   populateGPUDistributionPatterns(patterns);
-  populateGPUDistributeNestedLayoutAttrPatterns(patterns, laneId, subgroupSize,
-                                                workgroupSize);
+  IREE::VectorExt::populateNestedLayoutDistributionPatterns(
+      patterns, laneId, subgroupSize, workgroupSize);
   if (failed(distributeVectorOps(target, patterns, options))) {
     return emitDefaultSilenceableFailure(target);
   }
