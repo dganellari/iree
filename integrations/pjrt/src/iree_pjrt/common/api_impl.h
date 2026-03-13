@@ -152,7 +152,8 @@ class DeviceDescription {
     // Initialize debug strings.
     user_string_ = std::string(info_->path.data, info_->path.size);
     debug_string_ = std::string(info_->name.data, info_->name.size);
-    kind_string_ = std::string(info_->name.data, info_->name.size);
+    /* kind_string_ = std::string(info_->name.data, info_->name.size); */
+    kind_string_ = "device";
   }
   ~DeviceDescription();
   operator PJRT_DeviceDescription*() {

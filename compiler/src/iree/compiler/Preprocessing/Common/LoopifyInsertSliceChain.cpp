@@ -945,25 +945,45 @@ static LogicalResult convertChainGroupToForallDispatch(
   for (int64_t d = 0; d < srcType.getRank(); ++d)
     colShape[d] = (d == sliceDim) ? numIters : 1;
 
-  // --- Create scf.forall directly (no dispatch.region, no mapping) ---
-  // Let IREE's dispatch creation handle distribution naturally.
+  // --- Create flow.dispatch.region wrapping the entire forall ---
+  // The dispatch.region forces IREE to keep everything in one kernel.
+  // We do NOT set mapping attributes — IREE's codegen adds those later.
   rewriter.setInsertionPoint(chains[0].elements[0].insertOp);
-  ImplicitLocOpBuilder b(loc, rewriter);
 
-  // Shared outputs: initial empty accumulator tensors (one per chain).
-  SmallVector<Value> sharedInits;
+  SmallVector<Type> dispatchResultTypes;
   for (auto &chain : chains)
-    sharedInits.push_back(chain.initialDest);
+    dispatchResultTypes.push_back(chain.accType);
 
-  auto forallOp = scf::ForallOp::create(
-      b, loc,
-      ArrayRef<OpFoldResult>{b.getIndexAttr(0)},
-      ArrayRef<OpFoldResult>{b.getIndexAttr(numCells)},
-      ArrayRef<OpFoldResult>{b.getIndexAttr(1)},
-      ValueRange(sharedInits),
-      /*mapping=*/ArrayAttr{});
+  auto regionOp = IREE::Flow::DispatchRegionOp::create(
+      rewriter, loc, dispatchResultTypes,
+      /*result_dims=*/ValueRange{},
+      /*workload=*/ValueRange{});
+  Block &regionBody = regionOp.getBody().emplaceBlock();
 
   {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(&regionBody);
+    ImplicitLocOpBuilder b(loc, rewriter);
+
+    // Shared outputs: initial empty accumulator tensors (one per chain).
+    SmallVector<Value> sharedInits;
+    for (auto &chain : chains)
+      sharedInits.push_back(chain.initialDest);
+
+    // Create scf.forall WITH WorkgroupMappingAttr so IREE's codegen
+    // knows how to distribute it to GPU workgroups (one thread per cell).
+    auto forallOp = scf::ForallOp::create(
+        b, loc,
+        ArrayRef<OpFoldResult>{b.getIndexAttr(0)},
+        ArrayRef<OpFoldResult>{b.getIndexAttr(numCells)},
+        ArrayRef<OpFoldResult>{b.getIndexAttr(1)},
+        ValueRange(sharedInits),
+        /*mapping=*/rewriter.getArrayAttr(
+            {IREE::Codegen::WorkgroupMappingAttr::get(
+                rewriter.getContext(),
+                IREE::Codegen::WorkgroupId::IdX)}));
+
+    {
 
     Value cellId = forallOp.getInductionVars()[0];
     auto sharedOuts = forallOp.getRegionIterArgs();
@@ -1208,16 +1228,24 @@ static LogicalResult convertChainGroupToForallDispatch(
                                             offsets, sizes, strides);
     }
 
+    }
+
+    // flow.return the forall results from the dispatch region.
+    rewriter.setInsertionPointAfter(forallOp);
+    SmallVector<Value> regionResults;
+    for (size_t i = 0; i < nAccs; ++i)
+      regionResults.push_back(forallOp.getResult(i));
+    IREE::Flow::ReturnOp::create(rewriter, loc, regionResults);
   }
 
-  llvm::errs() << "[ForallDispatch] SUCCESS: created forall(%c in [0,"
-               << numCells << "), %k in [0," << numIters
+  llvm::errs() << "[ForallDispatch] SUCCESS: created dispatch.region with "
+                  "forall(%c in [0," << numCells << "), %k in [0," << numIters
                << ")) for " << chains.size() << " chains\n";
 
-  // Replace each chain's final insert_slice with forall result.
+  // Replace each chain's final insert_slice with dispatch region result.
   for (size_t i = 0; i < chains.size(); ++i) {
     rewriter.replaceOp(chains[i].elements.back().insertOp,
-                       forallOp->getResult(i));
+                       regionOp->getResult(i));
     for (int64_t j = (int64_t)chains[i].elements.size() - 2; j >= 0; --j)
       rewriter.eraseOp(chains[i].elements[j].insertOp);
   }
