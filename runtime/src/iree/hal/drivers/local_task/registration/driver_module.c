@@ -60,6 +60,22 @@ static iree_status_t iree_hal_local_task_driver_factory_try_create(
       host_allocator, IREE_ARRAYSIZE(executor_storage), executors,
       &executor_count));
 
+  // PATCH: Ensure at least one executor for consteval to work
+  // When no flags are set, create a default executor with 1 worker
+  if (executor_count == 0) {
+    iree_task_executor_options_t executor_options;
+    iree_task_executor_options_initialize(&executor_options);
+    iree_task_topology_t topology;
+    iree_task_topology_initialize_from_group_count(/*group_count=*/1, &topology);
+    iree_status_t topology_status = iree_task_executor_create(
+        executor_options, &topology, host_allocator, &executors[0]);
+    if (iree_status_is_ok(topology_status)) {
+      executor_count = 1;
+    }
+    iree_task_topology_deinitialize(&topology);
+    IREE_RETURN_IF_ERROR(topology_status);
+  }
+
   iree_hal_executable_plugin_manager_t* plugin_manager = NULL;
   iree_status_t status = iree_hal_executable_plugin_manager_create_from_flags(
       host_allocator, &plugin_manager);

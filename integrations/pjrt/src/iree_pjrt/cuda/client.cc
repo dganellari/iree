@@ -45,7 +45,12 @@ iree_status_t CUDAClientInstance::CreateDriver(iree_hal_driver_t** out_driver) {
 }
 
 bool CUDAClientInstance::SetDefaultCompilerFlags(CompilerJob* compiler_job) {
-  return compiler_job->SetFlag("--iree-hal-target-device=cuda");
+  // NOTE: --iree-cuda-target must be set BEFORE --iree-hal-target-device=cuda
+  // because the target device creation reads the cuda target option to populate
+  // the GPU target in hal.executable.target. If set after, the device is
+  // created with the default target (sm_60) which may lack GPU target details.
+  return compiler_job->SetFlag("--iree-cuda-target=sm_80") &&
+         compiler_job->SetFlag("--iree-hal-target-device=cuda");
 }
 
 }  // namespace iree::pjrt::cuda

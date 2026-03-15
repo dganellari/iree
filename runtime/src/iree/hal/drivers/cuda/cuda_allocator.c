@@ -29,6 +29,9 @@ typedef struct iree_hal_cuda_allocator_t {
   // The device that this allocator allocates memory from.
   CUdevice device;
 
+  // The CUDA context to activate before allocations.
+  CUcontext cu_context;
+
   // The CUDA stream that allocations should be used in.
   CUstream stream;
 
@@ -61,7 +64,7 @@ static iree_hal_cuda_allocator_t* iree_hal_cuda_allocator_cast(
 iree_status_t iree_hal_cuda_allocator_create(
     iree_hal_device_t* parent_device,
     const iree_hal_cuda_dynamic_symbols_t* cuda_symbols, CUdevice device,
-    CUstream stream, iree_hal_cuda_memory_pools_t* pools,
+    CUcontext cu_context, CUstream stream, iree_hal_cuda_memory_pools_t* pools,
     iree_allocator_t host_allocator, iree_hal_allocator_t** out_allocator) {
   IREE_ASSERT_ARGUMENT(parent_device);
   IREE_ASSERT_ARGUMENT(cuda_symbols);
@@ -112,6 +115,7 @@ iree_status_t iree_hal_cuda_allocator_create(
                                &allocator->resource);
   allocator->parent_device = parent_device;
   allocator->device = device;
+  allocator->cu_context = cu_context;
   allocator->stream = stream;
   allocator->pools = pools;
   allocator->symbols = cuda_symbols;
@@ -378,6 +382,12 @@ static iree_status_t iree_hal_cuda_allocator_allocate_buffer(
         "allocator cannot allocate a buffer with the given parameters");
 #endif  // IREE_STATUS_MODE
   }
+
+  // Ensure the CUDA context is active on the calling thread. The PJRT plugin
+  // may call allocate_buffer from a thread without an active CUDA context.
+  IREE_RETURN_IF_ERROR(IREE_CURESULT_TO_STATUS(
+      allocator->symbols, cuCtxSetCurrent(allocator->cu_context),
+      "cuCtxSetCurrent"));
 
   iree_status_t status = iree_ok_status();
   iree_hal_cuda_buffer_type_t buffer_type = IREE_HAL_CUDA_BUFFER_TYPE_DEVICE;
