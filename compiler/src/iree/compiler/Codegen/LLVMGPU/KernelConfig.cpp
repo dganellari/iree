@@ -2577,6 +2577,28 @@ LogicalResult initGPULaunchConfig(FunctionOpInterface funcOp) {
   }
 
   if (!rootOperation) {
+    // Check if there is a scf.forall with WorkgroupMappingAttr (e.g., from
+    // a preprocessing pass like LoopifyInsertSliceChain). Use basic lowering
+    // so the forall gets distributed to workgroups.
+    bool hasWorkgroupForall = false;
+    funcOp.walk([&](scf::ForallOp forallOp) {
+      auto mapping = forallOp.getMapping();
+      if (mapping && !mapping->empty() &&
+          isa<IREE::Codegen::WorkgroupMappingAttr>((*mapping)[0])) {
+        hasWorkgroupForall = true;
+      }
+    });
+    if (hasWorkgroupForall) {
+      SmallVector<int64_t, 3> workgroupSize = {1, 1, 1};
+      auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
+          funcOp.getContext(), CodeGenPipeline::LLVMGPUBaseLowering,
+          workgroupSize);
+      if (failed(setTranslationInfo(funcOp, translationInfo))) {
+        return failure();
+      }
+      return success();
+    }
+
     // No root operation found, set it to none.
     auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
         funcOp.getContext(), CodeGenPipeline::None);

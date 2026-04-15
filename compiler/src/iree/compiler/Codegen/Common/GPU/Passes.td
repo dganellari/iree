@@ -480,4 +480,39 @@ def ExpandGPUOpsPass :
   ];
 }
 
+def GPULoopifyUnrolledSliceChainPass :
+    InterfacePass<"iree-codegen-gpu-loopify-unrolled-slice-chain",
+                  "mlir::FunctionOpInterface"> {
+  let summary = "Convert unrolled insert_slice chains to scf.forall + scf.for loops";
+  let description = [{
+    Detects chains of tensor.insert_slice ops with consecutive constant offsets
+    (produced by JAX-traced Python loops lowered through StableHLO) and converts
+    them to GPU-friendly loop structures.
+
+    When `use-forall` is true (default), generates:
+      scf.forall (%cell in [0, numCells))
+        scf.for %k = 0 to numLevels
+          <scalarized body>
+
+    When false, generates a plain scf.for with tensor-level operations.
+
+    This pass runs at the codegen level (inside dispatch functions) to avoid
+    interfering with dispatch creation and upstream tiling passes.
+  }];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::linalg::LinalgDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::tensor::TensorDialect",
+  ];
+  let options = [
+    Option<"minChainLength", "min-chain-length", "int64_t",
+           /*default=*/"8",
+           "Minimum number of consecutive insert_slice ops to trigger loopification.">,
+    Option<"useForall", "use-forall", "bool",
+           /*default=*/"true",
+           "If true, generate scf.forall over cells with scf.for over levels.">,
+  ];
+}
+
 #endif // IREE_CODEGEN_COMMON_GPU_PASSES

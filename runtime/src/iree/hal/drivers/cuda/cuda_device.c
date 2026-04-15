@@ -505,7 +505,8 @@ static iree_status_t iree_hal_cuda_device_create_internal(
 
   if (iree_status_is_ok(status)) {
     status = iree_hal_cuda_allocator_create(
-        (iree_hal_device_t*)device, cuda_symbols, cu_device, dispatch_stream,
+        (iree_hal_device_t*)device, cuda_symbols, cu_device, context,
+        dispatch_stream,
         device->supports_memory_pools ? &device->memory_pools : NULL,
         host_allocator, &device->device_allocator);
   }

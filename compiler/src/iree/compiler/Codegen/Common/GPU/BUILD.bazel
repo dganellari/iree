@@ -78,6 +78,7 @@ iree_compiler_cc_library(
         "GPUFuseSubgroupConsumers.cpp",
         "GPUGeneralizeNamedOps.cpp",
         "GPUGreedilyDistributeToThreads.cpp",
+        "GPULoopifyUnrolledSliceChain.cpp",
         "GPUInferMemorySpace.cpp",
         "GPUMultiBuffering.cpp",
         "GPUNestedLayoutDistributionPatterns.cpp",

@@ -439,6 +439,9 @@ LogicalResult isAtBoundary(Operation *op) {
 void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
                                    const GPUPipelineOptions &pipelineOptions,
                                    bool forROCDL) {
+  //Detect unrolled insert_slice chains and convert to loops.
+  /* funcPassManager.addPass(createGPULoopifyUnrolledSliceChainPass()); */
+
   funcPassManager.addPass(createGPUPadConvsPass());
   if (pipelineOptions.useIgemmConvolution) {
     funcPassManager.addPass(createConvolutionToIGEMMPass());

@@ -91,13 +91,17 @@ static LogicalResult createDefaultWorkgroupCountRegion(
           "unhandled scf.forall op that doesnt have a mapping of "
           "`[#iree_linalg_ext.split_reduction_mapping]`");
     }
-    if (failed(IREE::LinalgExt::SplitReductionMappingAttr::verifyAttrList(
-            rewriter.getContext(), forallOp.getLoc(), mapping->getValue()))) {
-      return failure();
+    // Only add the split-reduction modifier if this is actually a
+    // split-reduction forall. Foralls with other mapping types (e.g.,
+    // WorkgroupMappingAttr from preprocessing) are handled by codegen.
+    if (succeeded(IREE::LinalgExt::SplitReductionMappingAttr::verifyAttrList(
+            rewriter.getContext(), forallOp.getLoc(), mapping->getValue(),
+            /*emitDiagnosticErrors=*/false))) {
+      defaultCountOp =
+          IREE::TensorExt::DispatchWorkgroupCountSplitReductionModifierOp::
+              create(rewriter, loc, defaultCountOp->getResults(),
+                     block->getArguments());
     }
-    defaultCountOp =
-        IREE::TensorExt::DispatchWorkgroupCountSplitReductionModifierOp::create(
-            rewriter, loc, defaultCountOp->getResults(), block->getArguments());
   }
   IREE::Flow::ReturnOp::create(rewriter, loc, defaultCountOp->getResults());
 
